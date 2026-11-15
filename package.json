@@ -8,14 +8,16 @@
   ],
   "scripts": {
     "dev": "concurrently \"npm run dev --workspace @astrabi/api\" \"npm run dev --workspace @astrabi/web\"",
-    "build": "npm run build --workspaces --if-present",
+    "build": "npm run prisma:generate && npm run build --workspaces --if-present",
     "lint": "npm run lint --workspaces --if-present",
     "test": "npm run test --workspaces --if-present",
-    "clean": "npm run clean --workspaces --if-present"
+    "clean": "npm run clean --workspaces --if-present",
+    "prisma:generate": "prisma generate --schema packages/prisma/schema.prisma"
   },
   "devDependencies": {
     "concurrently": "^8.2.0",
     "typescript": "^5.6.3",
-    "@types/node": "^22.10.1"
+    "@types/node": "^22.10.1",
+    "prisma": "^5.22.0"
   }
 }

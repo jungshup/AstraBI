@@ -1,47 +1,54 @@
-# AstraBI Foundation v0.1
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: astrabi-postgres
+    environment:
+      POSTGRES_DB: astrabi
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - '5432:5432'
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U postgres -d astrabi']
+      interval: 5s
+      timeout: 5s
+      retries: 10
 
-AstraBI is a modular analytics platform monorepo. The first runnable milestone provides a small HTTP API and a Korean-language status dashboard.
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    ports:
+      - '4000:4000'
+    environment:
+      NODE_ENV: development
+      PORT: 4000
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/astrabi
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ['CMD', 'node', '-e', "fetch('http://127.0.0.1:4000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
 
-## Requirements
-- Node.js 22 or later
-- npm 10 or later
-- Docker Compose (optional)
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile.web
+    ports:
+      - '3000:3000'
+    environment:
+      PORT: 3000
+      API_BASE_URL: http://localhost:4000
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
 
-## Run locally
-
-```bash
-npm install
-npm run dev
-```
-
-Open <http://localhost:3000>. The API listens on <http://localhost:4000>.
-
-Useful endpoints:
-
-```bash
-curl http://localhost:4000/health
-curl http://localhost:4000/api/v1/status
-```
-
-Build and test:
-
-```bash
-npm run build
-npm test
-```
-
-Run with Docker Compose:
-
-```bash
-docker compose up --build
-```
-
-## Current scope and security
-
-This is the first executable vertical slice, not a production-ready analytics application. It has no database persistence, user login, tenant isolation, or authorization yet. Do not expose it publicly or use it for sensitive data. The existing domain packages are scaffolding and are not yet wired into runtime requests.
-
-## Monorepo areas
-- `apps/api` — HTTP API and health/status endpoints
-- `apps/web` — status dashboard
-- `packages/*` — domain module foundations (Core, Prisma, Auth, User, RBAC, Audit, Security, Feature Flags, Branding, Dynamic Config, Experiments)
-- `infra/helm` — Helm chart foundation
+volumes:
+  postgres_data:
