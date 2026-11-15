@@ -1,24 +1,30 @@
-version: '3.9'
-
 services:
   api:
     build:
       context: .
       dockerfile: Dockerfile.api
-    container_name: astrabi-api
     ports:
       - '4000:4000'
     environment:
       NODE_ENV: development
+      PORT: 4000
+    healthcheck:
+      test: ['CMD', 'node', '-e', "fetch('http://127.0.0.1:4000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
     restart: unless-stopped
 
   web:
     build:
       context: .
       dockerfile: Dockerfile.web
-    container_name: astrabi-web
     ports:
       - '3000:3000'
     environment:
-      NODE_ENV: development
+      PORT: 3000
+      API_BASE_URL: http://localhost:4000
+    depends_on:
+      api:
+        condition: service_healthy
     restart: unless-stopped

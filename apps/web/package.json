@@ -8,14 +8,9 @@
     "build": "tsc -p tsconfig.json",
     "start": "node dist/main.js",
     "lint": "tsc -p tsconfig.json --noEmit",
-    "test": "node --test dist/**/*.test.js"
+    "test": "node --test"
   },
-  "dependencies": {
-    "@astrabi/core": "*",
-    "@astrabi/branding": "*",
-    "@astrabi/feature-flags": "*",
-    "@astrabi/dynamic-config": "*"
-  },
+  "dependencies": {},
   "devDependencies": {
     "tsx": "^4.19.2",
     "typescript": "^5.6.3",

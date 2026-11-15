@@ -1,34 +1,47 @@
 # AstraBI Foundation v0.1
 
-AstraBI is a modular analytics platform foundation designed as a monorepo with shared packages and application services.
+AstraBI is a modular analytics platform monorepo. The first runnable milestone provides a small HTTP API and a Korean-language status dashboard.
 
-## Included modules
-- CoreModule
-- Prisma
-- Auth
-- User
-- RBAC
-- Audit
-- Security
-- FeatureFlag
-- Branding
-- DynamicConfig
-- Experiment
+## Requirements
+- Node.js 22 or later
+- npm 10 or later
+- Docker Compose (optional)
 
-## Architecture
-- `apps/api` — backend API service
-- `apps/web` — frontend web app shell
-- `packages/*` — reusable domain modules
-- `infra/docker` — container runtime setup
-- `infra/helm` — Kubernetes deployment chart
-
-## Getting started
+## Run locally
 
 ```bash
 npm install
-npm run build
 npm run dev
 ```
 
-## Notes
-This scaffold is intentionally minimal and production-ready as a foundation for extension, not a full application buildout.
+Open <http://localhost:3000>. The API listens on <http://localhost:4000>.
+
+Useful endpoints:
+
+```bash
+curl http://localhost:4000/health
+curl http://localhost:4000/api/v1/status
+```
+
+Build and test:
+
+```bash
+npm run build
+npm test
+```
+
+Run with Docker Compose:
+
+```bash
+docker compose up --build
+```
+
+## Current scope and security
+
+This is the first executable vertical slice, not a production-ready analytics application. It has no database persistence, user login, tenant isolation, or authorization yet. Do not expose it publicly or use it for sensitive data. The existing domain packages are scaffolding and are not yet wired into runtime requests.
+
+## Monorepo areas
+- `apps/api` — HTTP API and health/status endpoints
+- `apps/web` — status dashboard
+- `packages/*` — domain module foundations (Core, Prisma, Auth, User, RBAC, Audit, Security, Feature Flags, Branding, Dynamic Config, Experiments)
+- `infra/helm` — Helm chart foundation

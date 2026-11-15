@@ -8,21 +8,9 @@
     "build": "tsc -p tsconfig.json",
     "start": "node dist/index.js",
     "lint": "tsc -p tsconfig.json --noEmit",
-    "test": "node --test dist/**/*.test.js"
+    "test": "npm run build && node --test test/*.test.js"
   },
-  "dependencies": {
-    "@astrabi/core": "*",
-    "@astrabi/prisma": "*",
-    "@astrabi/auth": "*",
-    "@astrabi/user": "*",
-    "@astrabi/rbac": "*",
-    "@astrabi/audit": "*",
-    "@astrabi/security": "*",
-    "@astrabi/feature-flags": "*",
-    "@astrabi/branding": "*",
-    "@astrabi/dynamic-config": "*",
-    "@astrabi/experiment": "*"
-  },
+  "dependencies": {},
   "devDependencies": {
     "tsx": "^4.19.2",
     "typescript": "^5.6.3",
