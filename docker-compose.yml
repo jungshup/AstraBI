@@ -1,0 +1,24 @@
+version: '3.9'
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    container_name: astrabi-api
+    ports:
+      - '4000:4000'
+    environment:
+      NODE_ENV: development
+    restart: unless-stopped
+
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile.web
+    container_name: astrabi-web
+    ports:
+      - '3000:3000'
+    environment:
+      NODE_ENV: development
+    restart: unless-stopped

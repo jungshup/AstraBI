@@ -1,0 +1,22 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "astrabi.fullname" . }}
+  labels:
+    app: {{ include "astrabi.name" . }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      app: {{ include "astrabi.name" . }}
+  template:
+    metadata:
+      labels:
+        app: {{ include "astrabi.name" . }}
+    spec:
+      containers:
+        - name: {{ include "astrabi.name" . }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - containerPort: 80
