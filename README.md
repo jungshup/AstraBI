@@ -1,54 +1,40 @@
-services:
-  postgres:
-    image: postgres:16-alpine
-    container_name: astrabi-postgres
-    environment:
-      POSTGRES_DB: astrabi
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
-    ports:
-      - '5432:5432'
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-    healthcheck:
-      test: ['CMD-SHELL', 'pg_isready -U postgres -d astrabi']
-      interval: 5s
-      timeout: 5s
-      retries: 10
+# AstraBI Foundation v0.1
 
-  api:
-    build:
-      context: .
-      dockerfile: Dockerfile.api
-    ports:
-      - '4000:4000'
-    environment:
-      NODE_ENV: development
-      PORT: 4000
-      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/astrabi
-    depends_on:
-      postgres:
-        condition: service_healthy
-    healthcheck:
-      test: ['CMD', 'node', '-e', "fetch('http://127.0.0.1:4000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
-      interval: 10s
-      timeout: 3s
-      retries: 5
-    restart: unless-stopped
+AstraBI is a modular analytics platform monorepo. The runnable foundation includes a PostgreSQL-backed API, login sessions, role-based access control, and an administrator console.
 
-  web:
-    build:
-      context: .
-      dockerfile: Dockerfile.web
-    ports:
-      - '3000:3000'
-    environment:
-      PORT: 3000
-      API_BASE_URL: http://localhost:4000
-    depends_on:
-      api:
-        condition: service_healthy
-    restart: unless-stopped
+## Run with Docker
 
-volumes:
-  postgres_data:
+```bash
+cp .env.example .env
+# Change ADMIN_PASSWORD and SESSION_SECRET in .env to unique local values.
+docker compose up --build
+```
+
+Open <http://localhost:3000>. The initial administrator is configured through `ADMIN_EMAIL` and `ADMIN_PASSWORD`. Never use the example credentials outside a disposable local environment.
+
+## Run locally
+
+Requirements: Node.js 22+, npm 10+, and PostgreSQL 16+.
+
+```bash
+cp .env.example .env
+# Set a private SESSION_SECRET (32+ bytes) and ADMIN_PASSWORD (12+ characters).
+set -a && . ./.env && set +a
+npm install
+npm run prisma:generate
+npm run db:migrate -- --name init
+npm run dev
+```
+
+API endpoints are served through the web origin at `/api/v1`:
+- `POST /api/v1/auth/login` — email/password login; sets an HttpOnly session cookie
+- `POST /api/v1/auth/logout` and `GET /api/v1/auth/session`
+- `GET /api/v1/admin/users` — administrator only
+- `PATCH /api/v1/admin/users/:id` — update role (`ADMIN`, `ANALYST`, `VIEWER`) or active state; administrator only
+- `GET /api/v1/admin/audit` — recent administrative audit records
+
+## Security and scope
+
+Passwords are stored as bcrypt hashes. Sessions are signed, expire after eight hours, and use HttpOnly/SameSite cookies; role and active status are re-read from PostgreSQL for protected requests. Login attempts are rate-limited per process. The web server proxies API calls so browsers use same-origin cookies. Production deployments must set a strong random `SESSION_SECRET`, unique administrator credentials, HTTPS, and an appropriate `WEB_ORIGIN`.
+
+This is an initial implementation, not a security-reviewed production identity system. It does not yet include password reset, MFA, email verification, session revocation, distributed rate limiting, or account creation UI. Configure secure backups and database credentials before any non-local deployment.

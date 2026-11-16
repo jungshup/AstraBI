@@ -2,17 +2,16 @@
   "name": "astrabi-foundation",
   "version": "0.1.0",
   "private": true,
-  "workspaces": [
-    "apps/*",
-    "packages/*"
-  ],
+  "workspaces": ["apps/*", "packages/*"],
   "scripts": {
     "dev": "concurrently \"npm run dev --workspace @astrabi/api\" \"npm run dev --workspace @astrabi/web\"",
-    "build": "npm run prisma:generate && npm run build --workspaces --if-present",
+    "build": "npm run prisma:generate && npm run build --workspace @astrabi/prisma && npm run build --workspaces --if-present",
     "lint": "npm run lint --workspaces --if-present",
     "test": "npm run test --workspaces --if-present",
     "clean": "npm run clean --workspaces --if-present",
-    "prisma:generate": "prisma generate --schema packages/prisma/schema.prisma"
+    "prisma:generate": "prisma generate --schema packages/prisma/schema.prisma",
+    "db:migrate": "prisma migrate dev --schema packages/prisma/schema.prisma",
+    "db:deploy": "prisma migrate deploy --schema packages/prisma/schema.prisma"
   },
   "devDependencies": {
     "concurrently": "^8.2.0",
