@@ -34,6 +34,38 @@ model FeatureFlag {
   updatedAt   DateTime @updatedAt
 }
 
+model Dashboard {
+  id          String          @id @default(cuid())
+  name        String
+  description String?
+  isDefault   Boolean         @default(false)
+  createdAt   DateTime        @default(now())
+  widgets     DashboardWidget[]
+}
+
+model DashboardWidget {
+  id          String   @id @default(cuid())
+  dashboardId String
+  title       String
+  type        String
+  metric      String
+  config      Json?
+  createdAt   DateTime @default(now())
+
+  dashboard Dashboard @relation(fields: [dashboardId], references: [id], onDelete: Cascade)
+}
+
+model Report {
+  id          String   @id @default(cuid())
+  title       String
+  description String?
+  status      String   @default("draft")
+  template    String   @default("table")
+  createdBy   String
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
 model AuditLog {
   id        String   @id @default(cuid())
   actor     String

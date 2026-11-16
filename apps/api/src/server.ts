@@ -1,5 +1,5 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
-import { createDatabaseClient, ensureDatabaseConnected } from '@astrabi/prisma';
+import { createDatabaseClient, ensureDatabaseConnected, seedBaseData } from '@astrabi/prisma';
 import {
   clearSessionCookie,
   createSessionToken,
@@ -15,7 +15,6 @@ import type { SessionUser, UserRole } from './auth.js';
 const db = createDatabaseClient();
 const allowedOrigin = process.env.WEB_ORIGIN ?? 'http://localhost:3000';
 let databaseConnected = false;
-const loginAttempts = new Map<string, { count: number; resetAt: number }>();
 const validRoles = new Set<UserRole>(['ADMIN', 'ANALYST', 'VIEWER']);
 
 function sendJson(response: ServerResponse, statusCode: number, body: unknown): void {
@@ -23,7 +22,6 @@ function sendJson(response: ServerResponse, statusCode: number, body: unknown): 
     'content-type': 'application/json; charset=utf-8',
     'cache-control': 'no-store',
     'x-content-type-options': 'nosniff',
-    'referrer-policy': 'no-referrer',
   });
   response.end(JSON.stringify(body));
 }
@@ -40,18 +38,15 @@ function setCors(request: IncomingMessage, response: ServerResponse): void {
 
 async function readJson(request: IncomingMessage): Promise<Record<string, unknown> | null> {
   const chunks: Buffer[] = [];
-  let length = 0;
   for await (const chunk of request) {
-    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-    length += buffer.length;
-    if (length > 16_384) throw new Error('request_too_large');
-    chunks.push(buffer);
+    const next = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    chunks.push(next);
   }
+  const raw = Buffer.concat(chunks).toString('utf8');
+  if (!raw) return null;
   try {
-    const value: unknown = JSON.parse(Buffer.concat(chunks).toString('utf8'));
-    return value !== null && typeof value === 'object' && !Array.isArray(value)
-      ? value as Record<string, unknown>
-      : null;
+    const value = JSON.parse(raw);
+    return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null;
   } catch {
     return null;
   }
@@ -60,29 +55,14 @@ async function readJson(request: IncomingMessage): Promise<Record<string, unknow
 async function currentUser(request: IncomingMessage): Promise<SessionUser | null> {
   const token = readSessionCookie(request);
   if (!token) return null;
-  const id = await verifySessionToken(token);
-  if (!id) return null;
+  const userId = await verifySessionToken(token);
+  if (!userId) return null;
   const user = await db.user.findUnique({
-    where: { id },
+    where: { id: userId },
     select: { id: true, email: true, name: true, role: true, isActive: true },
   });
   if (!user || !user.isActive) return null;
   return { id: user.id, email: user.email, name: user.name, role: user.role as UserRole };
-}
-
-function originIsAllowed(request: IncomingMessage): boolean {
-  return request.headers.origin === allowedOrigin;
-}
-
-function rateLimited(ip: string): boolean {
-  const now = Date.now();
-  const entry = loginAttempts.get(ip);
-  if (!entry || entry.resetAt <= now) {
-    loginAttempts.set(ip, { count: 1, resetAt: now + 15 * 60 * 1000 });
-    return false;
-  }
-  entry.count += 1;
-  return entry.count > 10;
 }
 
 async function writeAudit(actor: SessionUser, action: string, details: object): Promise<void> {
@@ -98,28 +78,10 @@ async function writeAudit(actor: SessionUser, action: string, details: object): 
 
 export async function initializeDatabase(): Promise<boolean> {
   databaseConnected = await ensureDatabaseConnected(db);
-  if (!databaseConnected) return false;
-
-  const email = process.env.ADMIN_EMAIL?.trim().toLowerCase();
-  const password = process.env.ADMIN_PASSWORD;
-  if (email && password) {
-    if (password.length < 12) throw new Error('ADMIN_PASSWORD must contain at least 12 characters.');
-    const existing = await db.user.findUnique({ where: { email } });
-    if (!existing) {
-      await db.user.create({
-        data: {
-          email,
-          name: 'Platform Admin',
-          role: 'ADMIN',
-          passwordHash: await hashPassword(password),
-        },
-      });
-      console.info(`Bootstrap administrator created for ${email}`);
-    }
-  } else {
-    console.warn('ADMIN_EMAIL/ADMIN_PASSWORD are unset; no bootstrap administrator was created.');
+  if (databaseConnected) {
+    await seedBaseData(db);
   }
-  return true;
+  return databaseConnected;
 }
 
 export function createApiServer(): Server {
@@ -147,7 +109,8 @@ export function createApiServer(): Server {
 
         if (pathname === '/api/v1/status' && method === 'GET') {
           sendJson(response, 200, {
-            name: 'AstraBI', version: '0.1.0',
+            name: 'AstraBI',
+            version: '0.1.0',
             environment: process.env.NODE_ENV ?? 'development',
             status: databaseConnected ? 'operational' : 'degraded',
             database: databaseConnected ? 'connected' : 'unavailable',
@@ -156,53 +119,36 @@ export function createApiServer(): Server {
           return;
         }
 
-        if (!databaseConnected) {
-          sendJson(response, 503, { error: 'database_unavailable' });
-          return;
-        }
-
-        if (pathname.startsWith('/api/v1/auth/') && ['POST', 'PATCH'].includes(method) && !originIsAllowed(request)) {
-          sendJson(response, 403, { error: 'origin_not_allowed' });
-          return;
-        }
-
         if (pathname === '/api/v1/auth/login' && method === 'POST') {
-          const ip = request.socket.remoteAddress ?? 'unknown';
-          if (rateLimited(ip)) {
-            sendJson(response, 429, { error: 'too_many_attempts', message: 'Try again in 15 minutes.' });
-            return;
-          }
-          if (!String(request.headers['content-type'] ?? '').includes('application/json')) {
-            sendJson(response, 415, { error: 'application_json_required' });
-            return;
-          }
-          const input = await readJson(request);
-          const email = typeof input?.email === 'string' ? input.email.trim().toLowerCase() : '';
-          const password = typeof input?.password === 'string' ? input.password : '';
-          if (!email || !password || email.length > 254 || password.length > 1024) {
+          const body = await readJson(request);
+          const email = typeof body?.email === 'string' ? body.email.trim().toLowerCase() : '';
+          const password = typeof body?.password === 'string' ? body.password : '';
+          if (!email || !password) {
             sendJson(response, 400, { error: 'invalid_credentials' });
             return;
           }
+
           const user = await db.user.findUnique({ where: { email } });
-          const valid = user?.isActive && user.passwordHash
-            ? await verifyPassword(password, user.passwordHash)
-            : false;
-          if (!valid || !user) {
+          if (!user || !user.isActive) {
             sendJson(response, 401, { error: 'invalid_credentials' });
             return;
           }
-          loginAttempts.delete(ip);
+
+          const valid = await verifyPassword(password, user.passwordHash);
+          if (!valid) {
+            sendJson(response, 401, { error: 'invalid_credentials' });
+            return;
+          }
+
           const sessionUser: SessionUser = {
-            id: user.id, email: user.email, name: user.name, role: user.role as UserRole,
+            id: user.id,
+            email: user.email,
+            name: user.name,
+            role: user.role as UserRole,
           };
+
           setSessionCookie(response, await createSessionToken(sessionUser));
           sendJson(response, 200, { user: sessionUser });
-          return;
-        }
-
-        if (pathname === '/api/v1/auth/logout' && method === 'POST') {
-          clearSessionCookie(response);
-          sendJson(response, 200, { ok: true });
           return;
         }
 
@@ -216,51 +162,158 @@ export function createApiServer(): Server {
           return;
         }
 
+        if (pathname === '/api/v1/auth/logout' && method === 'POST') {
+          clearSessionCookie(response);
+          sendJson(response, 200, { ok: true });
+          return;
+        }
+
+        if (!databaseConnected) {
+          sendJson(response, 503, { error: 'database_unavailable' });
+          return;
+        }
+
+        if (pathname === '/api/v1/admin/feature-flags' && method === 'GET') {
+          const actor = await currentUser(request);
+          if (!actor) { sendJson(response, 401, { error: 'unauthenticated' }); return; }
+          if (!hasRole(actor, ['ADMIN'])) { sendJson(response, 403, { error: 'forbidden' }); return; }
+
+          const flags = await db.featureFlag.findMany({ orderBy: { createdAt: 'asc' } });
+          sendJson(response, 200, { total: flags.length, data: flags });
+          return;
+        }
+
+        if (pathname.match(/^\/api\/v1\/admin\/feature-flags\/([^/]+)$/) && method === 'PATCH') {
+          const actor = await currentUser(request);
+          if (!actor) { sendJson(response, 401, { error: 'unauthenticated' }); return; }
+          if (!hasRole(actor, ['ADMIN'])) { sendJson(response, 403, { error: 'forbidden' }); return; }
+
+          const key = decodeURIComponent(pathname.split('/').at(-1) ?? '');
+          const body = await readJson(request);
+          const update = await db.featureFlag.update({
+            where: { key },
+            data: {
+              enabled: typeof body?.enabled === 'boolean' ? body.enabled : undefined,
+              description: typeof body?.description === 'string' ? body.description : undefined,
+            },
+          });
+
+          await writeAudit(actor, 'feature_flag.updated', { key, enabled: update.enabled, description: update.description });
+          sendJson(response, 200, { featureFlag: update });
+          return;
+        }
+
+        if (pathname === '/api/v1/dashboard' && method === 'GET') {
+          const actor = await currentUser(request);
+          if (!actor) { sendJson(response, 401, { error: 'unauthenticated' }); return; }
+          if (!hasRole(actor, ['ADMIN', 'ANALYST'])) { sendJson(response, 403, { error: 'forbidden' }); return; }
+
+          const dashboard = await db.dashboard.findFirst({
+            where: { isDefault: true },
+            include: { widgets: true },
+          });
+
+          sendJson(response, 200, {
+            name: dashboard?.name ?? 'No Dashboard',
+            description: dashboard?.description ?? null,
+            widgets: dashboard?.widgets ?? [],
+          });
+          return;
+        }
+
+        if (pathname === '/api/v1/reports' && method === 'GET') {
+          const actor = await currentUser(request);
+          if (!actor) { sendJson(response, 401, { error: 'unauthenticated' }); return; }
+          if (!hasRole(actor, ['ADMIN', 'ANALYST'])) { sendJson(response, 403, { error: 'forbidden' }); return; }
+
+          const reports = await db.report.findMany({ orderBy: { createdAt: 'desc' } });
+          sendJson(response, 200, { total: reports.length, data: reports });
+          return;
+        }
+
+        if (pathname === '/api/v1/reports' && method === 'POST') {
+          const actor = await currentUser(request);
+          if (!actor) { sendJson(response, 401, { error: 'unauthenticated' }); return; }
+          if (!hasRole(actor, ['ADMIN', 'ANALYST'])) { sendJson(response, 403, { error: 'forbidden' }); return; }
+
+          const body = await readJson(request);
+          const title = typeof body?.title === 'string' ? body.title.trim() : '';
+          if (!title) {
+            sendJson(response, 400, { error: 'invalid_report_title' });
+            return;
+          }
+
+          const created = await db.report.create({
+            data: {
+              title,
+              description: typeof body?.description === 'string' ? body.description : null,
+              status: typeof body?.status === 'string' ? body.status : 'draft',
+              template: typeof body?.template === 'string' ? body.template : 'table',
+              createdBy: actor.email,
+            },
+          });
+
+          await writeAudit(actor, 'report.created', { reportId: created.id, title });
+          sendJson(response, 200, { report: created });
+          return;
+        }
+
         if (pathname === '/api/v1/admin/users' && method === 'GET') {
           const actor = await currentUser(request);
           if (!actor) { sendJson(response, 401, { error: 'unauthenticated' }); return; }
           if (!hasRole(actor, ['ADMIN'])) { sendJson(response, 403, { error: 'forbidden' }); return; }
+
           const users = await db.user.findMany({
-            select: { id: true, email: true, name: true, role: true, isActive: true, createdAt: true },
             orderBy: { createdAt: 'asc' },
+            select: { id: true, email: true, name: true, role: true, isActive: true, createdAt: true },
           });
+
           sendJson(response, 200, { total: users.length, data: users });
           return;
         }
 
-        const userMatch = pathname.match(/^\/api\/v1\/admin\/users\/([^/]+)$/);
-        if (userMatch && method === 'PATCH') {
+        if (pathname.match(/^\/api\/v1\/admin\/users\/([^/]+)$/) && method === 'PATCH') {
           const actor = await currentUser(request);
           if (!actor) { sendJson(response, 401, { error: 'unauthenticated' }); return; }
           if (!hasRole(actor, ['ADMIN'])) { sendJson(response, 403, { error: 'forbidden' }); return; }
-          if (!String(request.headers['content-type'] ?? '').includes('application/json')) {
-            sendJson(response, 415, { error: 'application_json_required' }); return;
-          }
-          const input = await readJson(request);
-          const targetId = decodeURIComponent(userMatch[1]);
+
+          const targetId = decodeURIComponent(pathname.split('/').at(-1) ?? '');
           const target = await db.user.findUnique({ where: { id: targetId } });
           if (!target) { sendJson(response, 404, { error: 'user_not_found' }); return; }
+
+          const body = await readJson(request);
           const data: { role?: UserRole; isActive?: boolean } = {};
-          if (input && Object.hasOwn(input, 'role')) {
-            if (typeof input.role !== 'string' || !validRoles.has(input.role as UserRole)) {
-              sendJson(response, 400, { error: 'invalid_role' }); return;
+          if (body && Object.hasOwn(body, 'role')) {
+            if (typeof body.role !== 'string' || !validRoles.has(body.role as UserRole)) {
+              sendJson(response, 400, { error: 'invalid_role' });
+              return;
             }
-            data.role = input.role as UserRole;
+            data.role = body.role as UserRole;
           }
-          if (input && Object.hasOwn(input, 'isActive')) {
-            if (typeof input.isActive !== 'boolean') {
-              sendJson(response, 400, { error: 'invalid_is_active' }); return;
+          if (body && Object.hasOwn(body, 'isActive')) {
+            if (typeof body.isActive !== 'boolean') {
+              sendJson(response, 400, { error: 'invalid_is_active' });
+              return;
             }
-            data.isActive = input.isActive;
+            data.isActive = body.isActive;
           }
-          if (Object.keys(data).length === 0) { sendJson(response, 400, { error: 'empty_update' }); return; }
-          if (targetId === actor.id && (data.role && data.role !== 'ADMIN' || data.isActive === false)) {
-            sendJson(response, 400, { error: 'cannot_remove_own_admin_access' }); return;
+
+          if (Object.keys(data).length === 0) {
+            sendJson(response, 400, { error: 'empty_update' });
+            return;
           }
+
+          if ((data.role === 'VIEWER' || data.isActive === false) && targetId === actor.id) {
+            sendJson(response, 400, { error: 'cannot_remove_own_admin_access' });
+            return;
+          }
+
           const updated = await db.user.update({
-            where: { id: targetId }, data,
+            where: { id: targetId },
+            data,
             select: { id: true, email: true, name: true, role: true, isActive: true, createdAt: true },
           });
+
           await writeAudit(actor, 'user.updated', { userId: targetId, changes: data });
           sendJson(response, 200, { user: updated });
           return;
@@ -270,6 +323,7 @@ export function createApiServer(): Server {
           const actor = await currentUser(request);
           if (!actor) { sendJson(response, 401, { error: 'unauthenticated' }); return; }
           if (!hasRole(actor, ['ADMIN'])) { sendJson(response, 403, { error: 'forbidden' }); return; }
+
           const logs = await db.auditLog.findMany({ orderBy: { createdAt: 'desc' }, take: 50 });
           sendJson(response, 200, { total: logs.length, data: logs });
           return;
@@ -277,11 +331,7 @@ export function createApiServer(): Server {
 
         sendJson(response, 404, { error: 'not_found' });
       } catch (error) {
-        if (error instanceof Error && error.message === 'request_too_large') {
-          sendJson(response, 413, { error: 'request_too_large' });
-          return;
-        }
-        console.error('API request failed:', error);
+        console.error('API error:', error);
         sendJson(response, 500, { error: 'internal_server_error' });
       }
     })();
@@ -291,7 +341,10 @@ export function createApiServer(): Server {
 export function listen(server: Server, port: number): Promise<void> {
   return new Promise((resolve, reject) => {
     server.once('error', reject);
-    server.listen(port, '0.0.0.0', () => { server.off('error', reject); resolve(); });
+    server.listen(port, '0.0.0.0', () => {
+      server.off('error', reject);
+      resolve();
+    });
   });
 }
 
