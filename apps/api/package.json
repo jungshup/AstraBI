@@ -8,7 +8,7 @@
     "build": "tsc -p tsconfig.json",
     "start": "prisma migrate deploy --schema ../../packages/prisma/schema.prisma && node dist/index.js",
     "lint": "tsc -p tsconfig.json --noEmit",
-    "test": "npm run build && node --test test/*.test.js"
+    "test": "npm run build && node --test dist/*.test.js"
   },
   "dependencies": {
     "@astrabi/prisma": "*",
