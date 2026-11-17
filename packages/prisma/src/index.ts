@@ -26,91 +26,48 @@ export async function ensureDatabaseConnected(client: PrismaClient): Promise<boo
   }
 }
 
+/** Seeds demo BI data only. Administrator credentials must be provisioned separately. */
 export async function seedBaseData(client: PrismaClient): Promise<void> {
-  const adminUser = await client.user.findFirst({
-    where: { email: 'admin@astrabi.local' },
-  });
-
-  if (!adminUser) {
-    await client.user.create({
-      data: {
-        email: 'admin@astrabi.local',
-        name: 'Platform Admin',
-        role: 'ADMIN',
-        passwordHash: '$2a$12$u6vZ0C0WBP3gNn0xw/1hROxH9m7I1QDFLeD9zPc0Kf7K0wL3mB6Ce',
-      },
-    });
-  }
-
-  const featureFlag = await client.featureFlag.findFirst({
+  await client.featureFlag.upsert({
     where: { key: 'dashboard-v2' },
+    update: {},
+    create: {
+      key: 'dashboard-v2',
+      enabled: true,
+      description: 'New dashboard experience',
+    },
   });
 
-  if (!featureFlag) {
-    await client.featureFlag.create({
-      data: {
-        key: 'dashboard-v2',
-        enabled: true,
-        description: 'New dashboard experience',
-      },
-    });
-  }
-
-  const defaultDashboard = await client.dashboard.findFirst({
-    where: { isDefault: true },
-  });
-
-  if (!defaultDashboard) {
-    const dashboard = await client.dashboard.create({
+  let dashboard = await client.dashboard.findFirst({ where: { isDefault: true } });
+  if (!dashboard) {
+    dashboard = await client.dashboard.create({
       data: {
         name: 'AstraBI Overview',
         description: 'Core KPI dashboard',
         isDefault: true,
         widgets: {
           create: [
-            {
-              title: 'Revenue',
-              type: 'KPI',
-              metric: 'totalRevenue',
-              config: { value: 1284000, unit: 'KRW' },
-            },
-            {
-              title: 'Active Users',
-              type: 'KPI',
-              metric: 'activeUsers',
-              config: { value: 284, unit: 'users' },
-            },
-            {
-              title: 'Conversion',
-              type: 'KPI',
-              metric: 'conversionRate',
-              config: { value: 4.7, unit: '%' },
-            },
+            { title: 'Revenue', type: 'KPI', metric: 'totalRevenue', config: { value: 1284000, unit: 'KRW' } },
+            { title: 'Active Users', type: 'KPI', metric: 'activeUsers', config: { value: 284, unit: 'users' } },
+            { title: 'Conversion', type: 'KPI', metric: 'conversionRate', config: { value: 4.7, unit: '%' } },
           ],
         },
       },
     });
+  }
 
-    await client.report.create({
-      data: {
-        title: 'Sales Summary',
-        description: 'Weekly sales summary report',
-        status: 'published',
-        template: 'table',
-        createdBy: 'admin@astrabi.local',
-      },
+  const reportSeeds = [
+    { title: 'Sales Summary', description: 'Weekly sales summary report', status: 'published', template: 'table' },
+    { title: 'User Growth', description: 'Monthly growth report', status: 'draft', template: 'chart' },
+  ];
+  for (const report of reportSeeds) {
+    const existing = await client.report.findFirst({
+      where: { title: report.title, createdBy: 'system-seed' },
     });
-
-    await client.report.create({
-      data: {
-        title: 'User Growth',
-        description: 'Monthly growth report',
-        status: 'draft',
-        template: 'chart',
-        createdBy: 'admin@astrabi.local',
-      },
-    });
-
-    console.info(`Seeded dashboard ${dashboard.id}`);
+    if (!existing) {
+      await client.report.create({
+        data: { ...report, createdBy: 'system-seed' },
+      });
+    }
   }
 }

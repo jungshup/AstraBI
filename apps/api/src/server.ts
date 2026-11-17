@@ -38,8 +38,11 @@ function setCors(request: IncomingMessage, response: ServerResponse): void {
 
 async function readJson(request: IncomingMessage): Promise<Record<string, unknown> | null> {
   const chunks: Buffer[] = [];
+  let length = 0;
   for await (const chunk of request) {
     const next = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    length += next.length;
+    if (length > 16_384) throw new Error('request_too_large');
     chunks.push(next);
   }
   const raw = Buffer.concat(chunks).toString('utf8');
@@ -78,10 +81,28 @@ async function writeAudit(actor: SessionUser, action: string, details: object): 
 
 export async function initializeDatabase(): Promise<boolean> {
   databaseConnected = await ensureDatabaseConnected(db);
-  if (databaseConnected) {
-    await seedBaseData(db);
+  if (!databaseConnected) return false;
+
+  await seedBaseData(db);
+
+  // Only provision an administrator when explicit credentials are supplied.
+  const email = process.env.ADMIN_EMAIL?.trim().toLowerCase();
+  const password = process.env.ADMIN_PASSWORD;
+  if (email && password) {
+    if (password.length < 12) throw new Error('ADMIN_PASSWORD must contain at least 12 characters.');
+    const existing = await db.user.findUnique({ where: { email } });
+    if (!existing) {
+      await db.user.create({
+        data: {
+          email,
+          name: 'Platform Admin',
+          role: 'ADMIN',
+          passwordHash: await hashPassword(password),
+        },
+      });
+    }
   }
-  return databaseConnected;
+  return true;
 }
 
 export function createApiServer(): Server {
@@ -146,7 +167,6 @@ export function createApiServer(): Server {
             name: user.name,
             role: user.role as UserRole,
           };
-
           setSessionCookie(response, await createSessionToken(sessionUser));
           sendJson(response, 200, { user: sessionUser });
           return;
@@ -177,7 +197,6 @@ export function createApiServer(): Server {
           const actor = await currentUser(request);
           if (!actor) { sendJson(response, 401, { error: 'unauthenticated' }); return; }
           if (!hasRole(actor, ['ADMIN'])) { sendJson(response, 403, { error: 'forbidden' }); return; }
-
           const flags = await db.featureFlag.findMany({ orderBy: { createdAt: 'asc' } });
           sendJson(response, 200, { total: flags.length, data: flags });
           return;
@@ -187,7 +206,6 @@ export function createApiServer(): Server {
           const actor = await currentUser(request);
           if (!actor) { sendJson(response, 401, { error: 'unauthenticated' }); return; }
           if (!hasRole(actor, ['ADMIN'])) { sendJson(response, 403, { error: 'forbidden' }); return; }
-
           const key = decodeURIComponent(pathname.split('/').at(-1) ?? '');
           const body = await readJson(request);
           const update = await db.featureFlag.update({
@@ -197,7 +215,6 @@ export function createApiServer(): Server {
               description: typeof body?.description === 'string' ? body.description : undefined,
             },
           });
-
           await writeAudit(actor, 'feature_flag.updated', { key, enabled: update.enabled, description: update.description });
           sendJson(response, 200, { featureFlag: update });
           return;
@@ -207,12 +224,7 @@ export function createApiServer(): Server {
           const actor = await currentUser(request);
           if (!actor) { sendJson(response, 401, { error: 'unauthenticated' }); return; }
           if (!hasRole(actor, ['ADMIN', 'ANALYST'])) { sendJson(response, 403, { error: 'forbidden' }); return; }
-
-          const dashboard = await db.dashboard.findFirst({
-            where: { isDefault: true },
-            include: { widgets: true },
-          });
-
+          const dashboard = await db.dashboard.findFirst({ where: { isDefault: true }, include: { widgets: true } });
           sendJson(response, 200, {
             name: dashboard?.name ?? 'No Dashboard',
             description: dashboard?.description ?? null,
@@ -225,7 +237,6 @@ export function createApiServer(): Server {
           const actor = await currentUser(request);
           if (!actor) { sendJson(response, 401, { error: 'unauthenticated' }); return; }
           if (!hasRole(actor, ['ADMIN', 'ANALYST'])) { sendJson(response, 403, { error: 'forbidden' }); return; }
-
           const reports = await db.report.findMany({ orderBy: { createdAt: 'desc' } });
           sendJson(response, 200, { total: reports.length, data: reports });
           return;
@@ -235,14 +246,9 @@ export function createApiServer(): Server {
           const actor = await currentUser(request);
           if (!actor) { sendJson(response, 401, { error: 'unauthenticated' }); return; }
           if (!hasRole(actor, ['ADMIN', 'ANALYST'])) { sendJson(response, 403, { error: 'forbidden' }); return; }
-
           const body = await readJson(request);
           const title = typeof body?.title === 'string' ? body.title.trim() : '';
-          if (!title) {
-            sendJson(response, 400, { error: 'invalid_report_title' });
-            return;
-          }
-
+          if (!title) { sendJson(response, 400, { error: 'invalid_report_title' }); return; }
           const created = await db.report.create({
             data: {
               title,
@@ -252,7 +258,6 @@ export function createApiServer(): Server {
               createdBy: actor.email,
             },
           });
-
           await writeAudit(actor, 'report.created', { reportId: created.id, title });
           sendJson(response, 200, { report: created });
           return;
@@ -262,12 +267,10 @@ export function createApiServer(): Server {
           const actor = await currentUser(request);
           if (!actor) { sendJson(response, 401, { error: 'unauthenticated' }); return; }
           if (!hasRole(actor, ['ADMIN'])) { sendJson(response, 403, { error: 'forbidden' }); return; }
-
           const users = await db.user.findMany({
             orderBy: { createdAt: 'asc' },
             select: { id: true, email: true, name: true, role: true, isActive: true, createdAt: true },
           });
-
           sendJson(response, 200, { total: users.length, data: users });
           return;
         }
@@ -276,44 +279,32 @@ export function createApiServer(): Server {
           const actor = await currentUser(request);
           if (!actor) { sendJson(response, 401, { error: 'unauthenticated' }); return; }
           if (!hasRole(actor, ['ADMIN'])) { sendJson(response, 403, { error: 'forbidden' }); return; }
-
           const targetId = decodeURIComponent(pathname.split('/').at(-1) ?? '');
           const target = await db.user.findUnique({ where: { id: targetId } });
           if (!target) { sendJson(response, 404, { error: 'user_not_found' }); return; }
-
           const body = await readJson(request);
           const data: { role?: UserRole; isActive?: boolean } = {};
           if (body && Object.hasOwn(body, 'role')) {
             if (typeof body.role !== 'string' || !validRoles.has(body.role as UserRole)) {
-              sendJson(response, 400, { error: 'invalid_role' });
-              return;
+              sendJson(response, 400, { error: 'invalid_role' }); return;
             }
             data.role = body.role as UserRole;
           }
           if (body && Object.hasOwn(body, 'isActive')) {
             if (typeof body.isActive !== 'boolean') {
-              sendJson(response, 400, { error: 'invalid_is_active' });
-              return;
+              sendJson(response, 400, { error: 'invalid_is_active' }); return;
             }
             data.isActive = body.isActive;
           }
-
-          if (Object.keys(data).length === 0) {
-            sendJson(response, 400, { error: 'empty_update' });
-            return;
-          }
-
+          if (Object.keys(data).length === 0) { sendJson(response, 400, { error: 'empty_update' }); return; }
           if ((data.role === 'VIEWER' || data.isActive === false) && targetId === actor.id) {
-            sendJson(response, 400, { error: 'cannot_remove_own_admin_access' });
-            return;
+            sendJson(response, 400, { error: 'cannot_remove_own_admin_access' }); return;
           }
-
           const updated = await db.user.update({
             where: { id: targetId },
             data,
             select: { id: true, email: true, name: true, role: true, isActive: true, createdAt: true },
           });
-
           await writeAudit(actor, 'user.updated', { userId: targetId, changes: data });
           sendJson(response, 200, { user: updated });
           return;
@@ -323,7 +314,6 @@ export function createApiServer(): Server {
           const actor = await currentUser(request);
           if (!actor) { sendJson(response, 401, { error: 'unauthenticated' }); return; }
           if (!hasRole(actor, ['ADMIN'])) { sendJson(response, 403, { error: 'forbidden' }); return; }
-
           const logs = await db.auditLog.findMany({ orderBy: { createdAt: 'desc' }, take: 50 });
           sendJson(response, 200, { total: logs.length, data: logs });
           return;
@@ -331,6 +321,10 @@ export function createApiServer(): Server {
 
         sendJson(response, 404, { error: 'not_found' });
       } catch (error) {
+        if (error instanceof Error && error.message === 'request_too_large') {
+          sendJson(response, 413, { error: 'request_too_large' });
+          return;
+        }
         console.error('API error:', error);
         sendJson(response, 500, { error: 'internal_server_error' });
       }
@@ -341,10 +335,7 @@ export function createApiServer(): Server {
 export function listen(server: Server, port: number): Promise<void> {
   return new Promise((resolve, reject) => {
     server.once('error', reject);
-    server.listen(port, '0.0.0.0', () => {
-      server.off('error', reject);
-      resolve();
-    });
+    server.listen(port, '0.0.0.0', () => { server.off('error', reject); resolve(); });
   });
 }
 
