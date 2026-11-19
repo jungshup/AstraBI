@@ -1,5 +1,5 @@
 apiVersion: v2
 name: astrabi
-description: AstraBI Helm chart foundation for v0.1
+description: AstraBI analytics API and web application
 version: 0.1.0
 appVersion: "0.1.0"

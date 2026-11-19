@@ -3,19 +3,24 @@
   "version": "0.1.0",
   "private": true,
   "workspaces": [
-    "apps/*",
-    "packages/*"
+    "packages/*",
+    "apps/*"
   ],
   "scripts": {
     "dev": "concurrently \"npm run dev --workspace @astrabi/api\" \"npm run dev --workspace @astrabi/web\"",
-    "build": "npm run build --workspaces --if-present",
+    "build": "tsc -b",
     "lint": "npm run lint --workspaces --if-present",
-    "test": "npm run test --workspaces --if-present",
-    "clean": "npm run clean --workspaces --if-present"
+    "test": "npm run test --workspace @astrabi/api",
+    "clean": "npm run clean --workspaces --if-present",
+    "prisma:generate": "prisma generate --schema packages/prisma/schema.prisma",
+    "prisma:validate": "prisma validate --schema packages/prisma/schema.prisma",
+    "prisma:push": "prisma db push --schema packages/prisma/schema.prisma",
+    "prisma:migrate": "prisma migrate deploy --schema packages/prisma/schema.prisma"
   },
   "devDependencies": {
     "concurrently": "^8.2.0",
     "typescript": "^5.6.3",
-    "@types/node": "^22.10.1"
+    "@types/node": "^22.10.1",
+    "prisma": "^6.4.1"
   }
 }

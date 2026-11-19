@@ -1,6 +1,6 @@
 export interface PolicyRequest {
   action: string;
-  user: { id: string; tenantId: string; email?: string };
+  user: { id: string; tenantId: string; roles: string[] };
   tenantId: string;
 }
 
@@ -9,6 +9,15 @@ export function authorizeAction(request: PolicyRequest): boolean {
     return false;
   }
 
-  const adminActions = ['dashboard:view', 'user:manage', 'settings:update'];
-  return adminActions.includes(request.action) || request.user.email?.includes('admin') === true;
+  const permissions: Record<string, string[]> = {
+    ADMIN: [
+      'analytics:query',
+      'dashboard:manage',
+      'dashboard:view',
+      'user:manage',
+      'settings:update',
+    ],
+    MEMBER: ['dashboard:view'],
+  };
+  return request.user.roles.some((role) => permissions[role]?.includes(request.action) === true);
 }

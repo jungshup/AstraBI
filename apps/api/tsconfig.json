@@ -5,5 +5,11 @@
     "rootDir": "src",
     "composite": true
   },
-  "include": ["src/**/*"]
+  "include": ["src/**/*"],
+  "references": [
+    { "path": "../../packages/prisma" },
+    { "path": "../../packages/auth" },
+    { "path": "../../packages/rbac" },
+    { "path": "../../packages/security" }
+  ]
 }

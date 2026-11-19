@@ -1,0 +1,63 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: astrabi_test
+          POSTGRES_USER: astrabi
+          POSTGRES_PASSWORD: astrabi
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U astrabi -d astrabi_test"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+
+    env:
+      DATABASE_URL: postgresql://astrabi:astrabi@localhost:5432/astrabi_test
+      ASTRABI_TEST_DATABASE_URL: postgresql://astrabi:astrabi@localhost:5432/astrabi_test
+      JWT_SECRET: ci-test-secret-that-must-not-be-used-in-production
+      ASTRABI_DATA_ENCRYPTION_KEY: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+      ASTRABI_POSTGRES_HOST_ALLOWLIST: localhost
+      WEB_ORIGIN: http://localhost:3000
+      NODE_ENV: test
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Validate Prisma schema
+        run: npx prisma validate --schema packages/prisma/schema.prisma
+
+      - name: Generate Prisma client
+        run: npm run prisma:generate
+
+      - name: Initialize test database
+        run: npm run prisma:migrate
+
+      - name: Build
+        run: npm run build
+
+      - name: Test API
+        run: npm run test --workspace @astrabi/api
+
+      - name: Lint
+        run: npm run lint

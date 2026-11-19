@@ -1,6 +1,6 @@
 # AstraBI Foundation v0.1
 
-This repository provides a production-oriented monorepo foundation for AstraBI.
+This repository provides a modular monorepo foundation for AstraBI.
 
 ## Included areas
 - Core platform contracts and utilities
@@ -46,9 +46,17 @@ AstraBI/
 └── .gitignore
 ```
 
-## Next steps
-1. Add Prisma schema and migrations.
-2. Implement auth providers and JWT flows.
-3. Connect API to database and domain packages.
-4. Build UI pages and admin dashboards.
-5. Add CI/CD, environment config, and deployment policies.
+## Current functionality
+- PostgreSQL-backed tenant, user, session, and audit-log models
+- Tenant-scoped login, administrator user creation, role changes, and account disabling
+- Revocable JWT sessions, rate-limited login, and role-based API access
+- Browser UI for administrator sign-in and user management
+- Tenant-scoped PostgreSQL and CSV dataset connectors
+- Visual query builder and single-statement, selected-dataset SQL editor
+- Persisted dashboards with table, number, bar, line, and area panels
+- PostgreSQL-backed CI integration tests and Helm deployments for API and web
+
+Production encryption-key rotation, background refreshes for external data
+sources, and advanced chart interactions remain future work. See
+[testing and deployment](testing.md) for configuration and operational
+guidance.

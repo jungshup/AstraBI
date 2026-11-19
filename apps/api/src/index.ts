@@ -1,55 +1,33 @@
-import { appName, getSystemSummary, FeatureFlagKey, type PlatformEnvironment } from '@astrabi/core';
-import { createAuthContext } from '@astrabi/auth';
-import { createUserProfile } from '@astrabi/user';
-import { authorizeAction } from '@astrabi/rbac';
-import { auditEvent } from '@astrabi/audit';
-import { sanitizePayload } from '@astrabi/security';
-import { isFeatureEnabled } from '@astrabi/feature-flags';
-import { getBranding } from '@astrabi/branding';
-import { resolveDynamicConfig } from '@astrabi/dynamic-config';
-import { startExperiment } from '@astrabi/experiment';
+import { z } from 'zod';
+import { normalizePostgresHost } from './connectors.js';
+import { createServer } from './server.js';
+import { prisma } from '@astrabi/prisma';
 
-const environment: PlatformEnvironment = 'development';
-
-const authContext = createAuthContext({
-  subject: 'system-admin',
-  roles: ['admin'],
-  tenantId: 'default',
+const configSchema = z.object({
+  PORT: z.coerce.number().int().min(1).max(65535).default(4000),
+  DATABASE_URL: z.string().url(),
+  JWT_SECRET: z.string().min(32),
+  ASTRABI_DATA_ENCRYPTION_KEY: z.string().regex(/^[0-9a-f]{64}$/i),
+  ASTRABI_POSTGRES_HOST_ALLOWLIST: z.string().default('')
+    .transform((value) => value.split(',').map(normalizePostgresHost).filter(Boolean)),
+  WEB_ORIGIN: z.string().url().default('http://localhost:3000'),
 });
 
-const user = createUserProfile({
-  id: 'u-1001',
-  email: 'admin@astrabi.local',
-  displayName: 'Platform Admin',
-  tenantId: 'default',
-});
+const config = configSchema.parse(process.env);
+const app = await createServer({ prisma, config });
 
-const canAccess = authorizeAction({
-  action: 'dashboard:view',
-  user,
-  tenantId: 'default',
-});
+try {
+  await app.listen({ host: '0.0.0.0', port: config.PORT });
+  app.log.info(`AstraBI API listening on port ${config.PORT}`);
+} catch (error) {
+  app.log.error(error);
+  await prisma.$disconnect();
+  process.exitCode = 1;
+}
 
-const payload = {
-  name: '      AstraBI     ',
-  note: '<script>alert(1)</script>',
-};
-
-const safePayload = sanitizePayload(payload);
-const featureEnabled = isFeatureEnabled(FeatureFlagKey.EXPLORER_V2, environment);
-const branding = getBranding({ theme: 'dark' });
-const dynamicConfig = resolveDynamicConfig('catalog.defaultPageSize', environment);
-const experiment = startExperiment('conversion-hero', { audience: 'beta' });
-
-console.log(appName);
-console.log(getSystemSummary());
-console.log({ authContext, canAccess, safePayload, featureEnabled, branding, dynamicConfig, experiment });
-
-const health = {
-  service: 'astrabi-api',
-  status: 'ok',
-  version: '0.1.0',
-  moduleCount: 11,
-};
-
-console.log(JSON.stringify(health, null, 2));
+for (const signal of ['SIGINT', 'SIGTERM'] as const) {
+  process.once(signal, async () => {
+    await app.close();
+    await prisma.$disconnect();
+  });
+}
