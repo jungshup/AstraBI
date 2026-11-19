@@ -7,14 +7,7 @@
     "dev": "tsx watch src/main.ts",
     "build": "tsc -p tsconfig.json",
     "start": "node dist/main.js",
-    "lint": "tsc -p tsconfig.json --noEmit",
-    "test": "node --test dist/**/*.test.js"
-  },
-  "dependencies": {
-    "@astrabi/core": "*",
-    "@astrabi/branding": "*",
-    "@astrabi/feature-flags": "*",
-    "@astrabi/dynamic-config": "*"
+    "lint": "tsc -p tsconfig.json --noEmit"
   },
   "devDependencies": {
     "tsx": "^4.19.2",

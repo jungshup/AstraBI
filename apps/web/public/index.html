@@ -1,0 +1,214 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="light">
+    <title>AstraBI</title>
+    <link rel="stylesheet" href="/styles.css">
+    <script src="/config.js"></script>
+    <script defer src="/app.js"></script>
+  </head>
+  <body>
+    <main class="shell">
+      <header class="topbar">
+        <a class="brand" href="/">AstraBI</a>
+        <div class="topbar-actions">
+          <nav id="workspace-nav" class="workspace-nav" hidden aria-label="Workspace">
+            <button id="nav-analytics" class="button button-quiet" type="button">Analytics</button>
+            <button id="nav-users" class="button button-quiet" type="button" hidden>Users</button>
+          </nav>
+          <button id="sign-out" class="button button-quiet" type="button" hidden>Sign out</button>
+        </div>
+      </header>
+
+      <section id="message" class="message" role="status" aria-live="polite" hidden></section>
+
+      <section id="login-view" class="panel login-panel">
+        <p class="eyebrow">Analytics platform</p>
+        <h1>Sign in to AstraBI</h1>
+        <p class="muted">Use your tenant ID and account credentials.</p>
+        <form id="login-form" class="form">
+          <label>Tenant ID<input name="tenantId" autocomplete="organization" required></label>
+          <label>Email<input name="email" type="email" autocomplete="username" required></label>
+          <label>Password<input name="password" type="password" autocomplete="current-password" required></label>
+          <button class="button" type="submit">Sign in</button>
+        </form>
+      </section>
+
+      <section id="users-view" hidden>
+        <div class="page-heading">
+          <div>
+            <p class="eyebrow">Administration</p>
+            <h1>User management</h1>
+            <p id="account-summary" class="muted"></p>
+          </div>
+        </div>
+
+        <section class="panel">
+          <h2>Add a user</h2>
+          <form id="create-user-form" class="create-user-form">
+            <label>Email<input name="email" type="email" required></label>
+            <label>Display name<input name="displayName" maxlength="120" required></label>
+            <label>Temporary password<input name="password" type="password" minlength="12" required></label>
+            <button class="button" type="submit">Create user</button>
+          </form>
+        </section>
+
+        <section class="panel">
+          <div class="section-heading">
+            <h2>Users</h2>
+            <button id="refresh-users" class="button button-quiet" type="button">Refresh</button>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr><th>User</th><th>Role</th><th>Status</th><th>Actions</th></tr>
+              </thead>
+              <tbody id="users-list"></tbody>
+            </table>
+          </div>
+        </section>
+      </section>
+
+      <section id="analytics-view" hidden>
+        <div class="page-heading">
+          <div>
+            <p class="eyebrow">Explore</p>
+            <h1>Analytics studio</h1>
+            <p id="analytics-account-summary" class="muted"></p>
+          </div>
+        </div>
+
+        <section id="source-admin-tools" class="panel" hidden>
+          <div class="section-heading">
+            <div>
+              <h2>Connect data</h2>
+              <p class="muted">PostgreSQL connections must use an administrator-approved host.</p>
+            </div>
+            <button id="refresh-sources" class="button button-quiet" type="button">Refresh</button>
+          </div>
+          <div class="source-grid">
+            <form id="postgres-source-form" class="form compact-form">
+              <h3>PostgreSQL</h3>
+              <label>Connection name<input name="name" maxlength="120" required></label>
+              <label>Allowed host<input name="host" maxlength="253" required></label>
+              <div class="field-grid">
+                <label>Port<input name="port" type="number" min="1" max="65535" value="5432" required></label>
+                <label>Database<input name="database" required></label>
+              </div>
+              <label>Read-only database user<input name="user" autocomplete="off" required></label>
+              <label>Password<input name="password" type="password" autocomplete="new-password" required></label>
+              <button class="button" type="submit">Add connection</button>
+            </form>
+            <form id="csv-upload-form" class="form compact-form">
+              <h3>CSV upload</h3>
+              <p class="muted">Up to 10 MB, 25,000 rows, and 100 columns.</p>
+              <label>CSV file<input name="file" type="file" accept=".csv,text/csv" required></label>
+              <button class="button" type="submit">Import CSV</button>
+            </form>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>Connection</th><th>Type</th><th>Datasets</th><th>Tables</th></tr></thead>
+              <tbody id="sources-list"></tbody>
+            </table>
+          </div>
+          <div id="source-table-browser" class="source-table-browser" hidden></div>
+        </section>
+
+        <section id="datasets-section" class="panel">
+          <div class="section-heading">
+            <div>
+              <h2>Datasets</h2>
+              <p class="muted">CSV data is imported; PostgreSQL tables are read from their source.</p>
+            </div>
+            <button id="refresh-datasets" class="button button-quiet" type="button">Refresh</button>
+          </div>
+          <label class="dataset-choice">Dataset
+            <select id="dataset-select" required></select>
+          </label>
+          <div id="dataset-details" class="dataset-details muted"></div>
+        </section>
+
+        <section id="query-section" class="panel">
+          <div class="section-heading">
+            <div>
+              <h2>Query</h2>
+              <p class="muted">Queries load only selected tenant datasets into an isolated, memory-limited engine.</p>
+            </div>
+            <label class="mode-choice">Mode
+              <select id="query-mode">
+                <option value="visual">Visual builder</option>
+                <option value="sql">SQL editor</option>
+              </select>
+            </label>
+          </div>
+          <div id="visual-builder" class="query-builder">
+            <fieldset>
+              <legend>Dimensions</legend>
+              <div id="dimension-fields" class="field-options"></div>
+            </fieldset>
+            <div class="field-grid">
+              <label>Metric
+                <select id="metric-operation">
+                  <option value="count">Count rows</option>
+                  <option value="sum">Sum</option>
+                  <option value="avg">Average</option>
+                  <option value="min">Minimum</option>
+                  <option value="max">Maximum</option>
+                </select>
+              </label>
+              <label>Metric column<select id="metric-column"></select></label>
+            </div>
+          </div>
+          <div id="sql-builder" class="query-builder" hidden>
+            <label>Datasets for this query
+              <select id="sql-datasets" multiple size="4"></select>
+            </label>
+            <label>Read-only SQL
+              <textarea id="sql-editor" rows="8" spellcheck="false"></textarea>
+            </label>
+            <p class="muted">Use generated table names and column keys. One SELECT statement is allowed; CTEs are not supported yet.</p>
+            <div id="sql-dataset-help" class="dataset-details muted"></div>
+          </div>
+          <div class="query-actions">
+            <button id="run-query" class="button" type="button">Run query</button>
+            <span id="query-status" class="muted"></span>
+          </div>
+          <div id="query-results" class="table-wrap"></div>
+        </section>
+
+        <section class="panel">
+          <div class="section-heading">
+            <div>
+              <h2>Dashboards</h2>
+              <p class="muted">Save the current query as a dashboard panel.</p>
+            </div>
+            <button id="refresh-dashboards" class="button button-quiet" type="button">Refresh</button>
+          </div>
+          <form id="dashboard-form" class="inline-form">
+            <label>New dashboard<input name="name" maxlength="120" required></label>
+            <button class="button" type="submit">Create dashboard</button>
+          </form>
+          <form id="save-panel-form" class="inline-form panel-form">
+            <label>Panel title<input name="title" maxlength="120" required></label>
+            <label>Dashboard<select id="dashboard-select" name="dashboardId" required></select></label>
+            <label>Chart type
+              <select name="chartType">
+                <option value="TABLE">Table</option>
+                <option value="BAR">Bar</option>
+                <option value="LINE">Line</option>
+                <option value="AREA">Area</option>
+                <option value="NUMBER">Number</option>
+              </select>
+            </label>
+            <button class="button" type="submit">Save panel</button>
+          </form>
+          <div id="dashboards-list" class="dashboard-list"></div>
+          <div id="dashboard-results" class="dashboard-grid"></div>
+        </section>
+      </section>
+    </main>
+  </body>
+</html>

@@ -1,0 +1,177 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum UserRole {
+  ADMIN
+  MEMBER
+
+  @@map("user_role")
+}
+
+enum DataSourceKind {
+  POSTGRES
+  CSV
+
+  @@map("data_source_kind")
+}
+
+enum DashboardChartType {
+  TABLE
+  BAR
+  LINE
+  AREA
+  NUMBER
+
+  @@map("dashboard_chart_type")
+}
+
+model Tenant {
+  id        String   @id @default(uuid())
+  name      String
+  users     User[]
+  sessions  Session[]
+  auditLogs AuditLog[]
+  dataSources DataSource[]
+  datasets DataSet[]
+  datasetRows DataRow[]
+  dashboards Dashboard[]
+  dashboardPanels DashboardPanel[]
+
+  @@map("tenants")
+}
+
+model DataSource {
+  id              String         @id @default(uuid())
+  tenantId        String         @map("tenant_id")
+  name            String
+  kind            DataSourceKind
+  encryptedConfig String?        @map("encrypted_config")
+  encryptionIv    String?        @map("encryption_iv")
+  encryptionTag   String?        @map("encryption_tag")
+  createdAt       DateTime       @default(now()) @map("created_at")
+  tenant          Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  datasets        DataSet[]
+
+  @@unique([tenantId, id])
+  @@unique([tenantId, name])
+  @@map("data_sources")
+}
+
+model DataSet {
+  id           String         @id @default(uuid())
+  tenantId     String         @map("tenant_id")
+  dataSourceId String         @map("data_source_id")
+  name         String
+  columns      Json
+  sourceSchema String?        @map("source_schema")
+  sourceTable  String?        @map("source_table")
+  rowCount     Int?           @map("row_count")
+  createdAt    DateTime       @default(now()) @map("created_at")
+  tenant       Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  dataSource   DataSource     @relation(fields: [tenantId, dataSourceId], references: [tenantId, id], onDelete: Cascade)
+  rows         DataRow[]
+  panels       DashboardPanel[]
+
+  @@unique([tenantId, id])
+  @@unique([dataSourceId, name])
+  @@index([tenantId, dataSourceId])
+  @@map("datasets")
+}
+
+model DataRow {
+  id        String   @id @default(uuid())
+  tenantId  String   @map("tenant_id")
+  datasetId String   @map("dataset_id")
+  rowIndex  Int      @map("row_index")
+  data      Json     @map("row_data")
+  tenant    Tenant  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  dataset   DataSet @relation(fields: [tenantId, datasetId], references: [tenantId, id], onDelete: Cascade)
+
+  @@unique([datasetId, rowIndex])
+  @@index([tenantId, datasetId, rowIndex])
+  @@map("dataset_rows")
+}
+
+model Dashboard {
+  id        String            @id @default(uuid())
+  tenantId  String            @map("tenant_id")
+  name      String
+  createdAt DateTime          @default(now()) @map("created_at")
+  tenant    Tenant            @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  panels    DashboardPanel[]
+
+  @@unique([tenantId, id])
+  @@unique([tenantId, name])
+  @@map("dashboards")
+}
+
+model DashboardPanel {
+  id           String             @id @default(uuid())
+  tenantId     String             @map("tenant_id")
+  dashboardId  String             @map("dashboard_id")
+  datasetId    String             @map("dataset_id")
+  title        String
+  chartType    DashboardChartType @map("chart_type")
+  queryMode    String             @map("query_mode")
+  query        Json
+  position     Int                @default(0)
+  createdAt    DateTime           @default(now()) @map("created_at")
+  tenant       Tenant             @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  dashboard    Dashboard          @relation(fields: [tenantId, dashboardId], references: [tenantId, id], onDelete: Cascade)
+  dataset      DataSet            @relation(fields: [tenantId, datasetId], references: [tenantId, id], onDelete: Cascade)
+
+  @@index([tenantId, dashboardId, position])
+  @@map("dashboard_panels")
+}
+
+model User {
+  id        String    @id @default(uuid())
+  tenantId  String    @map("tenant_id")
+  email     String
+  displayName String  @map("display_name")
+  passwordHash String @map("password_hash")
+  role      UserRole  @default(MEMBER)
+  isActive  Boolean   @default(true) @map("is_active")
+  createdAt DateTime  @default(now()) @map("created_at")
+  tenant    Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  sessions  Session[]
+  auditLogs AuditLog[]
+
+  @@unique([tenantId, email])
+  @@map("users")
+}
+
+model Session {
+  id        String   @id @default(uuid())
+  tenantId  String   @map("tenant_id")
+  userId    String   @map("user_id")
+  jwtId     String   @unique @default(uuid()) @map("jwt_id")
+  isActive  Boolean  @default(true) @map("is_active")
+  expiresAt DateTime @map("expires_at")
+  tenant    Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, isActive])
+  @@map("sessions")
+}
+
+model AuditLog {
+  id        String   @id @default(uuid())
+  tenantId  String   @map("tenant_id")
+  actorId   String   @map("actor_id")
+  targetId  String   @map("target_id")
+  action    String
+  metadata  Json?
+  createdAt DateTime @default(now()) @map("created_at")
+  tenant    Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  actor     User     @relation(fields: [actorId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, createdAt])
+  @@map("audit_logs")
+}

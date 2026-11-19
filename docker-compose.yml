@@ -1,6 +1,22 @@
 version: '3.9'
 
 services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: astrabi
+      POSTGRES_USER: astrabi
+      POSTGRES_PASSWORD: local-dev-only
+    ports:
+      - '5432:5432'
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U astrabi -d astrabi']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+
   api:
     build:
       context: .
@@ -10,6 +26,24 @@ services:
       - '4000:4000'
     environment:
       NODE_ENV: development
+      PORT: 4000
+      DATABASE_URL: postgresql://astrabi:local-dev-only@postgres:5432/astrabi
+      JWT_SECRET: local-development-only-secret-change-before-deploying
+      ASTRABI_DATA_ENCRYPTION_KEY: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+      ASTRABI_POSTGRES_HOST_ALLOWLIST: ${ASTRABI_POSTGRES_HOST_ALLOWLIST:-}
+      WEB_ORIGIN: http://localhost:3000
+      ASTRABI_BOOTSTRAP_TENANT_ID: ${ASTRABI_BOOTSTRAP_TENANT_ID:-}
+      ASTRABI_BOOTSTRAP_TENANT_NAME: ${ASTRABI_BOOTSTRAP_TENANT_NAME:-}
+      ASTRABI_BOOTSTRAP_ADMIN_EMAIL: ${ASTRABI_BOOTSTRAP_ADMIN_EMAIL:-}
+      ASTRABI_BOOTSTRAP_ADMIN_PASSWORD: ${ASTRABI_BOOTSTRAP_ADMIN_PASSWORD:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ['CMD', 'node', '-e', "fetch('http://127.0.0.1:4000/readyz').then(response => process.exit(response.ok ? 0 : 1)).catch(() => process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
     restart: unless-stopped
 
   web:
@@ -21,4 +55,17 @@ services:
       - '3000:3000'
     environment:
       NODE_ENV: development
+      PORT: 3000
+      ASTRABI_API_URL: http://localhost:4000
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ['CMD', 'node', '-e', "fetch('http://127.0.0.1:3000/').then(response => process.exit(response.ok ? 0 : 1)).catch(() => process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
     restart: unless-stopped
+
+volumes:
+  postgres-data:

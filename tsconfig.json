@@ -1,8 +1,6 @@
 {
   "files": [],
   "references": [
-    { "path": "./apps/api" },
-    { "path": "./apps/web" },
     { "path": "./packages/core" },
     { "path": "./packages/prisma" },
     { "path": "./packages/auth" },
@@ -13,6 +11,8 @@
     { "path": "./packages/feature-flags" },
     { "path": "./packages/branding" },
     { "path": "./packages/dynamic-config" },
-    { "path": "./packages/experiment" }
+    { "path": "./packages/experiment" },
+    { "path": "./apps/api" },
+    { "path": "./apps/web" }
   ]
 }
