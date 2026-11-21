@@ -31,6 +31,14 @@ export function decryptSecret(encrypted: EncryptedSecret, keyHex: string): strin
   ]).toString('utf8');
 }
 
+export function rotateSecret(
+  encrypted: EncryptedSecret,
+  currentKeyHex: string,
+  newKeyHex: string,
+): EncryptedSecret {
+  return encryptSecret(decryptSecret(encrypted, currentKeyHex), newKeyHex);
+}
+
 export function normalizePayload<T>(input: T): T {
   if (typeof input === 'string') {
     return input.trim() as T;

@@ -2,8 +2,9 @@
 
 AstraBI is a modular analytics platform foundation. The current vertical
 slice includes a PostgreSQL-backed API, tenant-scoped administrator user
-management, bearer-token sessions, CSV and PostgreSQL data sources, a bounded
-analytics query engine, dashboard panels, a browser client, and a Helm chart.
+management, bearer-token sessions, CSV and PostgreSQL snapshot datasets with
+scheduled refresh, a bounded analytics query engine, dashboard panels, a
+browser client, and a Helm chart.
 
 ## Quick start
 
@@ -25,3 +26,5 @@ User, connector, and CSV import management require an administrator session.
 Queries and dashboards are tenant-scoped to the verified session. PostgreSQL
 SQL connections are allowlisted and TLS-only; analytics SQL runs against
 selected datasets in an isolated, memory-limited DuckDB instance.
+PostgreSQL datasets are copied into platform snapshots and can be manually or
+automatically refreshed; scheduling is disabled by default.

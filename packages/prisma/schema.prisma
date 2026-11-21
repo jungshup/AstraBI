@@ -72,6 +72,10 @@ model DataSet {
   sourceSchema String?        @map("source_schema")
   sourceTable  String?        @map("source_table")
   rowCount     Int?           @map("row_count")
+  refreshIntervalMinutes Int? @map("refresh_interval_minutes")
+  lastRefreshedAt DateTime?   @map("last_refreshed_at")
+  nextRefreshAt DateTime?     @map("next_refresh_at")
+  lastRefreshError String?    @map("last_refresh_error")
   createdAt    DateTime       @default(now()) @map("created_at")
   tenant       Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   dataSource   DataSource     @relation(fields: [tenantId, dataSourceId], references: [tenantId, id], onDelete: Cascade)
@@ -81,6 +85,7 @@ model DataSet {
   @@unique([tenantId, id])
   @@unique([dataSourceId, name])
   @@index([tenantId, dataSourceId])
+  @@index([refreshIntervalMinutes, nextRefreshAt])
   @@map("datasets")
 }
 

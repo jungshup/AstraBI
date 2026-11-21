@@ -3,7 +3,11 @@ import { randomUUID } from 'node:crypto';
 import test, { after, before } from 'node:test';
 import { issueAccessToken } from '@astrabi/auth';
 import type { PrismaClient } from '@astrabi/prisma';
-import { decryptSecret, encryptSecret, hashPassword } from '@astrabi/security';
+import { decryptSecret, encryptSecret, hashPassword, rotateSecret } from '@astrabi/security';
+import { rotateDataSourceEncryptionKey } from './rotate-encryption-key.js';
+import {
+  refreshPostgresDatasetAndRecordStatus,
+} from './dataset-refresh.js';
 import { createServer, type ServerConfig } from './server.js';
 
 const databaseUrl = process.env.ASTRABI_TEST_DATABASE_URL;
@@ -34,6 +38,11 @@ test('data source encryption protects stored credentials', () => {
   assert.notEqual(encrypted.ciphertext, 'postgres-password');
   assert.equal(decryptSecret(encrypted, key), 'postgres-password');
   assert.throws(() => decryptSecret({ ...encrypted, authTag: 'invalid' }, key));
+
+  const replacementKey = 'abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789';
+  const rotated = rotateSecret(encrypted, key, replacementKey);
+  assert.equal(decryptSecret(rotated, replacementKey), 'postgres-password');
+  assert.throws(() => decryptSecret(rotated, key));
 });
 
 before(async () => {
@@ -225,6 +234,195 @@ test('expired JWTs are rejected by protected routes', { skip: !databaseUrl }, as
   assert.equal(response.statusCode, 401);
 });
 
+test('stored PostgreSQL credentials can be rotated transactionally', { skip: !databaseUrl }, async () => {
+  const replacementKey = 'abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789';
+  const encrypted = encryptSecret(JSON.stringify({
+    host: 'localhost',
+    port: 5432,
+    database: 'source',
+    user: 'reader',
+    password: 'source-password',
+  }), config.ASTRABI_DATA_ENCRYPTION_KEY);
+  const source = await prisma!.dataSource.create({
+    data: {
+      tenantId,
+      name: `rotation-${randomUUID()}`,
+      kind: 'POSTGRES',
+      encryptedConfig: encrypted.ciphertext,
+      encryptionIv: encrypted.iv,
+      encryptionTag: encrypted.authTag,
+    },
+  });
+
+  try {
+    const rotatedCount = await rotateDataSourceEncryptionKey(
+      prisma!,
+      config.ASTRABI_DATA_ENCRYPTION_KEY,
+      replacementKey,
+    );
+    assert.ok(rotatedCount >= 1);
+    const updated = await prisma!.dataSource.findUniqueOrThrow({ where: { id: source.id } });
+    const rotated = {
+      ciphertext: updated.encryptedConfig!,
+      iv: updated.encryptionIv!,
+      authTag: updated.encryptionTag!,
+    };
+    const plaintext = decryptSecret(rotated, replacementKey);
+    assert.equal(JSON.parse(plaintext).password, 'source-password');
+    assert.throws(() => decryptSecret(rotated, config.ASTRABI_DATA_ENCRYPTION_KEY));
+  } finally {
+    await prisma!.dataSource.delete({ where: { id: source.id } });
+  }
+});
+
+test('PostgreSQL dataset snapshots refresh atomically and retain prior rows on schema removal', {
+  skip: !databaseUrl,
+}, async () => {
+  const encrypted = encryptSecret(JSON.stringify({
+    host: 'localhost',
+    port: 5432,
+    database: 'source',
+    user: 'reader',
+    password: 'source-password',
+  }), config.ASTRABI_DATA_ENCRYPTION_KEY);
+  const source = await prisma!.dataSource.create({
+    data: {
+      tenantId,
+      name: `snapshot-${randomUUID()}`,
+      kind: 'POSTGRES',
+      encryptedConfig: encrypted.ciphertext,
+      encryptionIv: encrypted.iv,
+      encryptionTag: encrypted.authTag,
+    },
+  });
+  const dataset = await prisma!.dataSet.create({
+    data: {
+      tenantId,
+      dataSourceId: source.id,
+      name: `sales-${randomUUID()}`,
+      sourceSchema: 'public',
+      sourceTable: 'sales',
+      columns: [
+        { key: 'c0', name: 'region', type: 'STRING' },
+        { key: 'c1', name: 'amount', type: 'NUMBER' },
+      ],
+      rowCount: 1,
+    },
+  });
+  await prisma!.dataRow.create({
+    data: { tenantId, datasetId: dataset.id, rowIndex: 0, data: ['Old', '7'] },
+  });
+
+  try {
+    const viewerEmail = `snapshot-viewer-${randomUUID()}@astrabi.test`;
+    await prisma!.user.create({
+      data: {
+        tenantId,
+        email: viewerEmail,
+        displayName: 'Snapshot Viewer',
+        passwordHash: await hashPassword('viewer-password-1234'),
+        role: 'MEMBER',
+      },
+    });
+    const viewerLogin = await app!.inject({
+      method: 'POST',
+      url: '/auth/login',
+      payload: { tenantId, email: viewerEmail, password: 'viewer-password-1234' },
+    });
+    assert.equal(viewerLogin.statusCode, 200);
+    const viewerToken = viewerLogin.json<{ token: string }>().token;
+    const memberSchedule = await app!.inject({
+      method: 'PATCH',
+      url: `/datasets/${dataset.id}/refresh-schedule`,
+      headers: { authorization: `Bearer ${viewerToken}` },
+      payload: { intervalMinutes: 15 },
+    });
+    assert.equal(memberSchedule.statusCode, 403);
+    const memberRefresh = await app!.inject({
+      method: 'POST',
+      url: `/datasets/${dataset.id}/refresh`,
+      headers: { authorization: `Bearer ${viewerToken}` },
+    });
+    assert.equal(memberRefresh.statusCode, 403);
+    const invalidSchedule = await app!.inject({
+      method: 'PATCH',
+      url: `/datasets/${dataset.id}/refresh-schedule`,
+      headers: { authorization: `Bearer ${adminToken}` },
+      payload: { intervalMinutes: 30 },
+    });
+    assert.equal(invalidSchedule.statusCode, 400);
+    const schedule = await app!.inject({
+      method: 'PATCH',
+      url: `/datasets/${dataset.id}/refresh-schedule`,
+      headers: { authorization: `Bearer ${adminToken}` },
+      payload: { intervalMinutes: 15 },
+    });
+    assert.equal(schedule.statusCode, 204);
+
+    const refreshedRows = await refreshPostgresDatasetAndRecordStatus(
+      prisma!,
+      tenantId,
+      dataset.id,
+      config,
+      async () => ({
+        columns: [
+          { key: 'c0', name: 'amount', type: 'NUMBER' },
+          { key: 'c1', name: 'region', type: 'STRING' },
+          { key: 'c2', name: 'channel', type: 'STRING' },
+        ],
+        rows: [['12', 'North', 'web'], ['20', 'South', 'store']],
+      }),
+    );
+    assert.equal(refreshedRows, 2);
+    const updated = await prisma!.dataSet.findUniqueOrThrow({ where: { id: dataset.id } });
+    assert.equal(updated.rowCount, 2);
+    assert.equal(updated.lastRefreshError, null);
+    assert.ok(updated.lastRefreshedAt);
+    assert.ok(updated.nextRefreshAt && updated.nextRefreshAt > new Date());
+    assert.deepEqual(updated.columns, [
+      { key: 'c1', name: 'amount', type: 'NUMBER' },
+      { key: 'c0', name: 'region', type: 'STRING' },
+      { key: 'c2', name: 'channel', type: 'STRING' },
+    ]);
+    const rows = await prisma!.dataRow.findMany({
+      where: { tenantId, datasetId: dataset.id },
+      orderBy: { rowIndex: 'asc' },
+      select: { data: true },
+    });
+    assert.deepEqual(rows.map(({ data }) => data), [
+      ['12', 'North', 'web'],
+      ['20', 'South', 'store'],
+    ]);
+
+    await assert.rejects(
+      refreshPostgresDatasetAndRecordStatus(
+        prisma!,
+        tenantId,
+        dataset.id,
+        config,
+        async () => ({
+          columns: [{ key: 'c0', name: 'region', type: 'STRING' }],
+          rows: [['Changed']],
+        }),
+      ),
+      { code: 'source_schema_changed' },
+    );
+    const afterFailure = await prisma!.dataSet.findUniqueOrThrow({ where: { id: dataset.id } });
+    assert.equal(afterFailure.lastRefreshError, 'source_schema_changed');
+    const retainedRows = await prisma!.dataRow.findMany({
+      where: { tenantId, datasetId: dataset.id },
+      orderBy: { rowIndex: 'asc' },
+      select: { data: true },
+    });
+    assert.deepEqual(retainedRows.map(({ data }) => data), [
+      ['12', 'North', 'web'],
+      ['20', 'South', 'store'],
+    ]);
+  } finally {
+    await prisma!.dataSource.delete({ where: { id: source.id } });
+  }
+});
+
 test('CSV datasets support visual and read-only SQL queries and saved dashboard panels', {
   skip: !databaseUrl,
 }, async () => {
@@ -366,13 +564,59 @@ test('CSV datasets support visual and read-only SQL queries and saved dashboard 
     },
   });
   assert.equal(panel.statusCode, 201);
+  const sourcePanelId = panel.json<{ id: string }>().id;
+  const metricPanel = await app!.inject({
+    method: 'POST',
+    url: `/dashboards/${dashboardId}/panels`,
+    headers: { authorization: `Bearer ${adminToken}` },
+    payload: {
+      title: 'Total sales',
+      chartType: 'NUMBER',
+      query: {
+        mode: 'visual',
+        datasetId: dataset.id,
+        dimensions: [],
+        metrics: [{ operation: 'sum', column: 'c1' }],
+      },
+    },
+  });
+  assert.equal(metricPanel.statusCode, 201);
+  const metricPanelId = metricPanel.json<{ id: string }>().id;
+
   const dashboardResult = await app!.inject({
     method: 'GET',
     url: `/dashboards/${dashboardId}/results`,
     headers: { authorization: `Bearer ${adminToken}` },
   });
   assert.equal(dashboardResult.statusCode, 200);
-  assert.equal(dashboardResult.json<{ panels: unknown[] }>().panels.length, 1);
+  assert.equal(dashboardResult.json<{ panels: unknown[] }>().panels.length, 2);
+
+  const filteredResult = await app!.inject({
+    method: 'GET',
+    url: `/dashboards/${dashboardId}/results?sourcePanelId=${sourcePanelId}&value=North`,
+    headers: { authorization: `Bearer ${adminToken}` },
+  });
+  assert.equal(filteredResult.statusCode, 200);
+  const filteredPanels = filteredResult.json<{
+    activeFilter: { sourcePanelId: string; value: string };
+    panels: Array<{ id: string; result: { rows: unknown[][] } }>;
+  }>();
+  assert.deepEqual(filteredPanels.activeFilter, { sourcePanelId, value: 'North' });
+  assert.deepEqual(
+    filteredPanels.panels
+      .find((item) => item.id === sourcePanelId)?.result.rows
+      .sort((left, right) => String(left[0]).localeCompare(String(right[0]))),
+    [['North', 15], ['South', 20]],
+  );
+  const totalSales = filteredPanels.panels.find((item) => item.id === metricPanelId);
+  assert.deepEqual(totalSales?.result.rows, [[15]]);
+
+  const invalidFilterSource = await app!.inject({
+    method: 'GET',
+    url: `/dashboards/${dashboardId}/results?sourcePanelId=${randomUUID()}&value=North`,
+    headers: { authorization: `Bearer ${adminToken}` },
+  });
+  assert.equal(invalidFilterSource.statusCode, 400);
 
   const viewerId = randomUUID();
   const viewerEmail = `viewer-${randomUUID()}@astrabi.test`;

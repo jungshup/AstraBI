@@ -1,4 +1,17 @@
 import { Client } from 'pg';
+import { z } from 'zod';
+import { decryptSecret } from '@astrabi/security';
+
+export const maxPostgresDatasetRows = 25_000;
+export const maxPostgresDatasetColumns = 100;
+
+const postgresConnectionConfigSchema = z.object({
+  host: z.string(),
+  port: z.number().int(),
+  database: z.string(),
+  user: z.string(),
+  password: z.string(),
+});
 
 export interface PostgresConnectorConfig {
   host: string;
@@ -12,6 +25,33 @@ export interface DatasetColumnMetadata {
   key: string;
   name: string;
   type: 'STRING' | 'NUMBER' | 'DATE' | 'BOOLEAN';
+}
+
+export interface PostgresTableSnapshot {
+  columns: DatasetColumnMetadata[];
+  rows: Array<Array<string | null>>;
+}
+
+export function decryptPostgresConnectorConfig(
+  source: {
+    encryptedConfig: string | null;
+    encryptionIv: string | null;
+    encryptionTag: string | null;
+  },
+  key: string,
+): PostgresConnectorConfig {
+  if (!source.encryptedConfig || !source.encryptionIv || !source.encryptionTag) {
+    throw new Error('PostgreSQL source configuration is incomplete.');
+  }
+  try {
+    return postgresConnectionConfigSchema.parse(JSON.parse(decryptSecret({
+      ciphertext: source.encryptedConfig,
+      iv: source.encryptionIv,
+      authTag: source.encryptionTag,
+    }, key)));
+  } catch {
+    throw new Error('PostgreSQL source configuration could not be decrypted.');
+  }
 }
 
 interface PostgresColumn {
@@ -107,6 +147,41 @@ export async function inspectPostgresTable(
   }
 }
 
+export async function readPostgresTableSnapshot(
+  config: PostgresConnectorConfig,
+  schema: string,
+  table: string,
+): Promise<PostgresTableSnapshot> {
+  const columns = await inspectPostgresTable(config, schema, table);
+  if (columns.length === 0 || columns.length > maxPostgresDatasetColumns) {
+    return { columns, rows: [] };
+  }
+  const client = createClient(config);
+  let connected = false;
+  try {
+    await client.connect();
+    connected = true;
+    await client.query('BEGIN READ ONLY');
+    await client.query("SET LOCAL statement_timeout = '5s'");
+    const result = await client.query(
+      `SELECT * FROM ${quotePostgresIdentifier(schema)}.${quotePostgresIdentifier(table)} LIMIT $1`,
+      [maxPostgresDatasetRows + 1],
+    );
+    await client.query('COMMIT');
+    const rows = result.rows.map((row) =>
+      columns.map(({ name }) => {
+        const value = row[name];
+        if (value === null || value === undefined) return null;
+        if (value instanceof Date) return value.toISOString();
+        return Buffer.isBuffer(value) ? value.toString('base64') : String(value);
+      }),
+    );
+    return { columns, rows };
+  } finally {
+    if (connected) await client.end();
+  }
+}
+
 export function inferCsvColumnType(values: string[]): DatasetColumnMetadata['type'] {
   const present = values.filter((value) => value !== '');
   if (present.length === 0) return 'STRING';
@@ -118,6 +193,10 @@ export function inferCsvColumnType(values: string[]): DatasetColumnMetadata['typ
     return 'DATE';
   }
   return 'STRING';
+}
+
+function quotePostgresIdentifier(identifier: string): string {
+  return `"${identifier.replace(/"/g, '""')}"`;
 }
 
 function createClient(config: PostgresConnectorConfig): Client {
