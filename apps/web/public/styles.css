@@ -40,6 +40,12 @@ textarea:focus { outline: 3px solid #4169d833; border-color: #4169d8; }
 .field-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
 .dataset-choice { max-width: 520px; margin-top: 20px; }
 .dataset-details { margin-top: 10px; font-size: 13px; line-height: 1.6; overflow-wrap: anywhere; }
+.dataset-details p { margin-bottom: 8px; }
+.dataset-refresh-status { color: #68748a; }
+.dataset-refresh-status.refresh-error { color: #a5312a; }
+.dataset-refresh-controls { display: flex; flex-wrap: wrap; gap: 12px; align-items: end; margin: 12px 0; }
+.dataset-refresh-controls label { width: min(240px, 100%); }
+.dataset-sql-table { color: #68748a; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
 .mode-choice { width: 190px; }
 .query-builder { display: grid; gap: 18px; margin-top: 22px; }
 .query-builder fieldset { min-width: 0; margin: 0; padding: 14px; border: 1px solid #e2e7ef; border-radius: 8px; }
@@ -57,12 +63,18 @@ textarea:focus { outline: 3px solid #4169d833; border-color: #4169d8; }
 .dashboard-panel { min-width: 0; margin: 0; padding: 18px; }
 .dashboard-panel h3 { margin: 0 0 14px; font-size: 15px; }
 .number-value { margin: 12px 0; color: #345ed1; font-size: 40px; font-weight: 750; }
+.chart-container { position: relative; }
 .dashboard-panel svg { display: block; width: 100%; min-height: 160px; }
 .bar-shape { fill: #4b70dd; }
 .svg-chart-label, .svg-chart-value { fill: #58657a; font: 12px Inter, ui-sans-serif, sans-serif; }
 .svg-chart-value { text-anchor: end; font-variant-numeric: tabular-nums; }
 .line-shape { fill: none; stroke: #345ed1; stroke-width: 3; stroke-linecap: round; stroke-linejoin: round; }
 .area-shape { fill: #345ed12b; }
+.chart-mark { cursor: help; }
+.chart-point { fill: #fff; stroke: #345ed1; stroke-width: 2; }
+.chart-mark:focus-visible { stroke: #172033; stroke-width: 4; outline: none; }
+.chart-tooltip { position: absolute; z-index: 1; top: 8px; right: 8px; max-width: min(320px, calc(100% - 16px)); padding: 8px 10px; border: 1px solid #d5ddeb; border-radius: 7px; color: #172033; background: #fff; box-shadow: 0 4px 14px #27334d1a; font-size: 12px; pointer-events: none; }
+.chart-hint { margin: 8px 0 0; font-size: 11px; }
 .chart-labels { display: flex; flex-wrap: wrap; gap: 6px 12px; color: #68748a; font-size: 11px; }
 .source-table-browser { margin-top: 18px; padding: 16px; border: 1px solid #e2e7ef; border-radius: 8px; }
 .source-table-browser h3 { margin: 0 0 12px; font-size: 15px; }
@@ -71,6 +83,8 @@ textarea:focus { outline: 3px solid #4169d833; border-color: #4169d8; }
 .source-table-item:last-child { border-bottom: 0; }
 .section-heading { display: flex; justify-content: space-between; align-items: center; }
 .section-heading h2 { margin-bottom: 0; }
+.dashboard-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.dashboard-filter-status { margin: 12px 0; font-size: 13px; }
 .table-wrap { overflow-x: auto; margin: 16px -4px 0; }
 table { width: 100%; border-collapse: collapse; text-align: left; }
 th, td { padding: 13px 10px; border-bottom: 1px solid #edf0f5; vertical-align: middle; }

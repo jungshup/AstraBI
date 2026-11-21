@@ -12,13 +12,21 @@ import {
 } from './analytics.js';
 import {
   inferCsvColumnType,
-  inspectPostgresTable,
+  decryptPostgresConnectorConfig,
   listPostgresTables,
+  maxPostgresDatasetRows,
   normalizePostgresHost,
+  readPostgresTableSnapshot,
   type DatasetColumnMetadata,
   type PostgresConnectorConfig,
   verifyPostgresConnection,
 } from './connectors.js';
+import {
+  DatasetRefreshError,
+  refreshPostgresDatasetAndRecordStatus,
+  setDatasetRefreshInterval,
+  withDatasetRefreshLock,
+} from './dataset-refresh.js';
 import { isAccessTokenError, issueAccessToken, verifyAccessToken } from '@astrabi/auth';
 import { authorizeAction } from '@astrabi/rbac';
 import type { Prisma, PrismaClient, UserRole } from '@astrabi/prisma';
@@ -65,6 +73,13 @@ const dashboardPanelSchema = z.object({
   chartType: z.enum(['TABLE', 'BAR', 'LINE', 'AREA', 'NUMBER']),
   query: analyticsQuerySchema,
 });
+const refreshScheduleSchema = z.object({
+  intervalMinutes: z.union([z.literal(null), z.literal(15), z.literal(60), z.literal(360), z.literal(1440)]),
+});
+const dashboardResultFilterSchema = z.object({
+  sourcePanelId: z.string().uuid().optional(),
+  value: z.string().max(500).optional(),
+}).strict();
 const csvUploadMaxBytes = 10 * 1024 * 1024;
 const csvUploadMaxRows = 25_000;
 const csvUploadMaxColumns = 100;
@@ -478,14 +493,24 @@ export async function createServer(options: {
       return reply.code(403).send({ error: 'postgres_host_not_allowed' });
     }
 
-    const columns = await inspectPostgresTable(
-      sourceConfig,
-      parsed.data.schema,
-      parsed.data.table,
-    );
-    if (columns.length === 0) return reply.code(404).send({ error: 'postgres_table_not_found' });
-    if (columns.length > csvUploadMaxColumns) {
+    let snapshot;
+    try {
+      snapshot = await readPostgresTableSnapshot(
+        sourceConfig,
+        parsed.data.schema,
+        parsed.data.table,
+      );
+    } catch {
+      return reply.code(422).send({ error: 'postgres_snapshot_failed' });
+    }
+    if (snapshot.columns.length === 0) {
+      return reply.code(404).send({ error: 'postgres_table_not_found' });
+    }
+    if (snapshot.columns.length > csvUploadMaxColumns) {
       return reply.code(413).send({ error: 'too_many_columns' });
+    }
+    if (snapshot.rows.length > maxPostgresDatasetRows) {
+      return reply.code(413).send({ error: 'dataset_too_large' });
     }
 
     try {
@@ -497,7 +522,9 @@ export async function createServer(options: {
             name: `${parsed.data.schema}.${parsed.data.table}`,
             sourceSchema: parsed.data.schema,
             sourceTable: parsed.data.table,
-            columns: columns.map((column) => ({ ...column })),
+            columns: snapshot.columns.map((column) => ({ ...column })),
+            rowCount: snapshot.rows.length,
+            lastRefreshedAt: new Date(),
           },
           select: {
             id: true,
@@ -505,8 +532,20 @@ export async function createServer(options: {
             columns: true,
             sourceSchema: true,
             sourceTable: true,
+            rowCount: true,
+            lastRefreshedAt: true,
           },
         });
+        for (let offset = 0; offset < snapshot.rows.length; offset += 1000) {
+          await transaction.dataRow.createMany({
+            data: snapshot.rows.slice(offset, offset + 1000).map((values, index) => ({
+              tenantId: actor.tenantId,
+              datasetId: created.id,
+              rowIndex: offset + index,
+              data: values,
+            })),
+          });
+        }
         await transaction.auditLog.create({
           data: {
             tenantId: actor.tenantId,
@@ -522,6 +561,90 @@ export async function createServer(options: {
     } catch (error) {
       if (isUniqueConstraintError(error)) {
         return reply.code(409).send({ error: 'dataset_already_registered' });
+      }
+      throw error;
+    }
+  });
+
+  app.patch<{ Params: { id: string } }>('/datasets/:id/refresh-schedule', async (request, reply) => {
+    const actor = await authenticate(request, reply);
+    if (!actor) return;
+    if (!canManageUsers(actor)) return reply.code(403).send({ error: 'forbidden' });
+    if (!userIdSchema.safeParse(request.params.id).success) {
+      return reply.code(400).send({ error: 'invalid_dataset_id' });
+    }
+    const parsed = refreshScheduleSchema.safeParse(request.body);
+    if (!parsed.success) return reply.code(400).send({ error: 'invalid_refresh_interval' });
+
+    try {
+      await setDatasetRefreshInterval(
+        prisma,
+        actor.tenantId,
+        request.params.id,
+        parsed.data.intervalMinutes,
+      );
+    } catch (error) {
+      if (error instanceof DatasetRefreshError && error.code === 'dataset_not_found') {
+        return reply.code(404).send({ error: error.code });
+      }
+      if (error instanceof DatasetRefreshError) {
+        return reply.code(400).send({ error: error.code });
+      }
+      throw error;
+    }
+    await prisma.auditLog.create({
+      data: {
+        tenantId: actor.tenantId,
+        actorId: actor.id,
+        targetId: request.params.id,
+        action: 'dataset.refresh_schedule_changed',
+        metadata: { intervalMinutes: parsed.data.intervalMinutes },
+      },
+    });
+    return reply.code(204).send();
+  });
+
+  app.post<{ Params: { id: string } }>('/datasets/:id/refresh', async (request, reply) => {
+    const actor = await authenticate(request, reply);
+    if (!actor) return;
+    if (!canManageUsers(actor)) return reply.code(403).send({ error: 'forbidden' });
+    if (!userIdSchema.safeParse(request.params.id).success) {
+      return reply.code(400).send({ error: 'invalid_dataset_id' });
+    }
+    const dataset = await prisma.dataSet.findFirst({
+      where: {
+        id: request.params.id,
+        tenantId: actor.tenantId,
+        dataSource: { kind: 'POSTGRES' },
+      },
+      select: { id: true },
+    });
+    if (!dataset) return reply.code(404).send({ error: 'dataset_not_found' });
+
+    try {
+      const lock = await withDatasetRefreshLock(config.DATABASE_URL, () =>
+        refreshPostgresDatasetAndRecordStatus(
+          prisma,
+          actor.tenantId,
+          dataset.id,
+          config,
+        ),
+      );
+      if (!lock.acquired) return reply.code(409).send({ error: 'refresh_in_progress' });
+      const rowCount = lock.result ?? 0;
+      await prisma.auditLog.create({
+        data: {
+          tenantId: actor.tenantId,
+          actorId: actor.id,
+          targetId: dataset.id,
+          action: 'dataset.refreshed',
+          metadata: { rowCount },
+        },
+      });
+      return { datasetId: dataset.id, rowCount, refreshedAt: new Date().toISOString() };
+    } catch (error) {
+      if (error instanceof DatasetRefreshError) {
+        return reply.code(422).send({ error: error.code });
       }
       throw error;
     }
@@ -636,6 +759,10 @@ export async function createServer(options: {
         name: true,
         columns: true,
         rowCount: true,
+        refreshIntervalMinutes: true,
+        lastRefreshedAt: true,
+        nextRefreshAt: true,
+        lastRefreshError: true,
         createdAt: true,
         dataSource: { select: { id: true, name: true, kind: true } },
       },
@@ -650,13 +777,7 @@ export async function createServer(options: {
     if (!canQueryAnalytics(actor)) return reply.code(403).send({ error: 'forbidden' });
     const parsed = analyticsQuerySchema.safeParse(request.body);
     if (!parsed.success) return reply.code(400).send({ error: 'invalid_request' });
-    return executeAnalyticsQuery(
-      prisma,
-      actor.tenantId,
-      config.ASTRABI_DATA_ENCRYPTION_KEY,
-      config.ASTRABI_POSTGRES_HOST_ALLOWLIST,
-      parsed.data,
-    );
+    return executeAnalyticsQuery(prisma, actor.tenantId, parsed.data);
   });
 
   app.get('/dashboards', async (request, reply) => {
@@ -775,8 +896,11 @@ export async function createServer(options: {
     return reply.code(201).send(panel);
   });
 
-  app.get<{ Params: { id: string } }>('/dashboards/:id/results', {
-    config: { rateLimit: { max: 5, timeWindow: '1 minute' } },
+  app.get<{
+    Params: { id: string };
+    Querystring: { sourcePanelId?: string; value?: string };
+  }>('/dashboards/:id/results', {
+    config: { rateLimit: { max: 30, timeWindow: '1 minute' } },
   }, async (request, reply) => {
     const actor = await authenticate(request, reply);
     if (!actor) return;
@@ -784,31 +908,80 @@ export async function createServer(options: {
     if (!userIdSchema.safeParse(request.params.id).success) {
       return reply.code(400).send({ error: 'invalid_dashboard_id' });
     }
+    const filterParams = dashboardResultFilterSchema.safeParse(request.query);
+    if (!filterParams.success) return reply.code(400).send({ error: 'invalid_dashboard_filter' });
+    const hasSourcePanel = filterParams.data.sourcePanelId !== undefined;
+    const hasFilterValue = filterParams.data.value !== undefined;
+    if (hasSourcePanel !== hasFilterValue) {
+      return reply.code(400).send({ error: 'invalid_dashboard_filter' });
+    }
+
     const dashboard = await prisma.dashboard.findFirst({
       where: { id: request.params.id, tenantId: actor.tenantId },
       include: { panels: { orderBy: { position: 'asc' } } },
     });
     if (!dashboard) return reply.code(404).send({ error: 'dashboard_not_found' });
 
+    let activeFilter: { sourcePanelId: string; datasetId: string; column: string; value: string } | undefined;
+    if (hasSourcePanel && hasFilterValue) {
+      const sourcePanel = dashboard.panels.find(
+        (panel) => panel.id === filterParams.data.sourcePanelId,
+      );
+      if (!sourcePanel) return reply.code(400).send({ error: 'invalid_dashboard_filter_source' });
+      const sourceQuery = analyticsQuerySchema.safeParse(sourcePanel.query);
+      if (!sourceQuery.success || sourceQuery.data.mode !== 'visual' ||
+          sourceQuery.data.dimensions.length === 0) {
+        return reply.code(400).send({ error: 'dashboard_panel_not_filterable' });
+      }
+      activeFilter = {
+        sourcePanelId: sourcePanel.id,
+        datasetId: sourceQuery.data.datasetId,
+        column: sourceQuery.data.dimensions[0],
+        value: filterParams.data.value!,
+      };
+    }
+
     const panels: Array<{
       id: string;
       title: string;
       chartType: string;
+      crossFilter: { datasetId: string; column: string } | null;
       result: { columns: string[]; rows: unknown[][]; truncated: boolean };
     }> = [];
     for (const panel of dashboard.panels) {
       const query = analyticsQuerySchema.safeParse(panel.query);
       if (!query.success) throw new AnalyticsError(500, 'invalid_saved_query', 'A saved dashboard query is invalid.');
+      const crossFilter = query.data.mode === 'visual' && query.data.dimensions.length > 0
+        ? { datasetId: query.data.datasetId, column: query.data.dimensions[0] }
+        : null;
+      let panelQuery = query.data;
+      if (activeFilter && panel.id !== activeFilter.sourcePanelId &&
+          query.data.mode === 'visual' && query.data.datasetId === activeFilter.datasetId) {
+        if (query.data.filters.length >= 20) {
+          return reply.code(400).send({ error: 'dashboard_filter_limit' });
+        }
+        panelQuery = {
+          ...query.data,
+          filters: [
+            ...query.data.filters,
+            { column: activeFilter.column, operator: 'eq', value: activeFilter.value },
+          ],
+        };
+      }
       const result = await executeAnalyticsQuery(
         prisma,
         actor.tenantId,
-        config.ASTRABI_DATA_ENCRYPTION_KEY,
-        config.ASTRABI_POSTGRES_HOST_ALLOWLIST,
-        query.data,
+        panelQuery,
       );
-      panels.push({ id: panel.id, title: panel.title, chartType: panel.chartType, result });
+      panels.push({ id: panel.id, title: panel.title, chartType: panel.chartType, crossFilter, result });
     }
-    return { dashboardId: dashboard.id, panels };
+    return {
+      dashboardId: dashboard.id,
+      activeFilter: activeFilter
+        ? { sourcePanelId: activeFilter.sourcePanelId, value: activeFilter.value }
+        : null,
+      panels,
+    };
   });
 
   app.setErrorHandler((error, _request, reply) => {
@@ -867,17 +1040,14 @@ function decryptPostgresConfig(
   },
   key: string,
 ): PostgresConnectorConfig {
-  if (!source.encryptedConfig || !source.encryptionIv || !source.encryptionTag) {
-    throw new AnalyticsError(500, 'invalid_data_source', 'The PostgreSQL source configuration is incomplete.');
-  }
   try {
-    return postgresSourceSchema.omit({ name: true }).parse(JSON.parse(decryptSecret({
-      ciphertext: source.encryptedConfig,
-      iv: source.encryptionIv,
-      authTag: source.encryptionTag,
-    }, key)));
+    return decryptPostgresConnectorConfig(source, key);
   } catch {
-    throw new AnalyticsError(500, 'invalid_data_source', 'The PostgreSQL source configuration could not be decrypted.');
+    throw new AnalyticsError(
+      500,
+      'invalid_data_source',
+      'The PostgreSQL source configuration could not be decrypted.',
+    );
   }
 }
 

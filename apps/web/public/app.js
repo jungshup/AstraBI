@@ -13,6 +13,9 @@ const queryResults = document.querySelector('#query-results');
 let currentUser;
 let datasets = [];
 let lastQuery;
+let chartTooltipSequence = 0;
+let currentDashboardId;
+let activeDashboardFilter;
 
 function showMessage(text, isError = false) {
   message.textContent = text;
@@ -242,10 +245,80 @@ function renderSelectedDataset() {
     return;
   }
 
+  details.replaceChildren();
   const columns = Array.isArray(dataset.columns) ? dataset.columns : [];
-  details.textContent = `${dataset.rowCount ?? 'Live'} rows · ${columns
+  const summary = document.createElement('p');
+  summary.textContent = `${dataset.rowCount ?? 0} rows · ${columns
     .map((column) => `${column.name} (${column.type.toLowerCase()})`)
     .join(', ')}`;
+  details.append(summary);
+
+  if (dataset.dataSource.kind === 'POSTGRES') {
+    const refreshStatus = document.createElement('p');
+    refreshStatus.className = 'dataset-refresh-status';
+    if (dataset.lastRefreshError) {
+      refreshStatus.textContent = `Last refresh failed (${dataset.lastRefreshError}); the previous snapshot is retained.`;
+      refreshStatus.classList.add('refresh-error');
+    } else if (dataset.lastRefreshedAt) {
+      refreshStatus.textContent = `Snapshot updated ${new Date(dataset.lastRefreshedAt).toLocaleString()}.`;
+    } else {
+      refreshStatus.textContent = 'No snapshot yet. Refresh this dataset to load its rows.';
+    }
+    details.append(refreshStatus);
+
+    const controls = document.createElement('div');
+    controls.className = 'dataset-refresh-controls';
+    const scheduleLabel = document.createElement('label');
+    scheduleLabel.textContent = 'Automatic refresh';
+    const schedule = document.createElement('select');
+    schedule.add(new Option('Off', ''));
+    schedule.add(new Option('Every 15 minutes', '15'));
+    schedule.add(new Option('Every hour', '60'));
+    schedule.add(new Option('Every 6 hours', '360'));
+    schedule.add(new Option('Every 24 hours', '1440'));
+    schedule.value = dataset.refreshIntervalMinutes === null
+      ? ''
+      : String(dataset.refreshIntervalMinutes);
+    schedule.addEventListener('change', async () => {
+      schedule.disabled = true;
+      try {
+        await request(`/datasets/${encodeURIComponent(dataset.id)}/refresh-schedule`, {
+          method: 'PATCH',
+          body: JSON.stringify({
+            intervalMinutes: schedule.value === '' ? null : Number(schedule.value),
+          }),
+        });
+        showMessage('Dataset refresh schedule updated.');
+        await loadDatasets();
+      } catch (error) {
+        showMessage(error.message, true);
+        schedule.disabled = false;
+      }
+    });
+    scheduleLabel.append(schedule);
+    const refreshButton = document.createElement('button');
+    refreshButton.className = 'button button-quiet';
+    refreshButton.type = 'button';
+    refreshButton.textContent = 'Refresh now';
+    refreshButton.addEventListener('click', async () => {
+      refreshButton.disabled = true;
+      refreshButton.textContent = 'Refreshing...';
+      try {
+        const result = await request(`/datasets/${encodeURIComponent(dataset.id)}/refresh`, {
+          method: 'POST',
+        });
+        showMessage(`Dataset snapshot refreshed (${result.rowCount} rows).`);
+        await loadDatasets();
+      } catch (error) {
+        showMessage(error.message, true);
+        refreshButton.disabled = false;
+        refreshButton.textContent = 'Refresh now';
+      }
+    });
+    controls.append(scheduleLabel, refreshButton);
+    details.append(controls);
+  }
+
   for (const column of columns) {
     const label = document.createElement('label');
     label.className = 'option-label';
@@ -261,8 +334,10 @@ function renderSelectedDataset() {
   }
 
   const sqlTable = datasetTableName(dataset.id);
-  details.append(document.createElement('br'));
-  details.append(document.createTextNode(`SQL table: ${sqlTable}`));
+  const sqlTableLabel = document.createElement('p');
+  sqlTableLabel.className = 'dataset-sql-table';
+  sqlTableLabel.textContent = `SQL table: ${sqlTable}`;
+  details.append(sqlTableLabel);
   document.querySelector('#sql-editor').value = `SELECT * FROM ${sqlTable} LIMIT 20;`;
   updateSqlDatasetHelp();
   updateVisualQueryExample();
@@ -394,14 +469,52 @@ async function loadDashboards() {
   }
 }
 
-async function loadDashboardResults(dashboardId) {
+async function loadDashboardResults(dashboardId, filterSelection = null) {
   const results = document.querySelector('#dashboard-results');
+  const isClearingFilter = Boolean(activeDashboardFilter) && !filterSelection;
   results.replaceChildren();
   try {
-    const dashboard = await request(`/dashboards/${encodeURIComponent(dashboardId)}/results`);
+    const params = new URLSearchParams();
+    if (filterSelection) {
+      params.set('sourcePanelId', filterSelection.sourcePanelId);
+      params.set('value', filterSelection.value);
+    }
+    const queryString = params.toString();
+    const query = queryString ? `?${queryString}` : '';
+    const dashboard = await request(
+      `/dashboards/${encodeURIComponent(dashboardId)}/results${query}`,
+    );
+    currentDashboardId = dashboardId;
+    activeDashboardFilter = dashboard.activeFilter;
     for (const panel of dashboard.panels) renderPanel(results, panel);
+    updateDashboardFilterStatus(dashboard);
+    if (isClearingFilter) results.querySelector('.chart-mark[tabindex="0"]')?.focus();
   } catch (error) {
     showMessage(error.message, true);
+  }
+}
+
+function updateDashboardFilterStatus(dashboard) {
+  const clearButton = document.querySelector('#clear-dashboard-filter');
+  const status = document.querySelector('#dashboard-filter-status');
+  const activeFilter = dashboard.activeFilter;
+  clearButton.hidden = !activeFilter;
+  status.hidden = !activeFilter;
+  if (!activeFilter) {
+    status.textContent = '';
+    return;
+  }
+  const sourcePanel = dashboard.panels.find((panel) => panel.id === activeFilter.sourcePanelId);
+  status.textContent = `Filtering matching visual panels by ${sourcePanel?.title ?? 'selected chart'}: ${activeFilter.value}`;
+  clearButton.focus();
+}
+
+function selectDashboardFilter(panel, value) {
+  if (currentDashboardId && panel.crossFilter && value !== null && value !== undefined) {
+    loadDashboardResults(currentDashboardId, {
+      sourcePanelId: panel.id,
+      value: String(value),
+    });
   }
 }
 
@@ -425,11 +538,15 @@ function renderPanel(container, panel) {
     const numericValues = displayedRows.map((row) => Number(row[1]));
     const finiteValues = numericValues.filter(Number.isFinite);
     const max = Math.max(1, ...finiteValues);
+    const chartContainer = document.createElement('div');
+    chartContainer.className = 'chart-container';
+    const tooltip = createChartTooltip(chartContainer);
     const chart = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
     const chartHeight = Math.max(100, displayedRows.length * 28);
     chart.setAttribute('viewBox', `0 0 640 ${chartHeight}`);
-    chart.setAttribute('role', 'img');
-    chart.setAttribute('aria-label', panel.title);
+    chart.setAttribute('role', 'group');
+    chart.setAttribute('aria-label', `${panel.title} chart. Focus a data point and use arrow keys to navigate.`);
+    const marks = [];
     displayedRows.forEach((row, index) => {
       const y = index * 28 + 18;
       const numericValue = Number.isFinite(numericValues[index]) ? numericValues[index] : 0;
@@ -437,6 +554,7 @@ function renderPanel(container, panel) {
       label.setAttribute('x', '0');
       label.setAttribute('y', String(y + 12));
       label.setAttribute('class', 'svg-chart-label');
+      label.setAttribute('aria-hidden', 'true');
       label.textContent = String(row[0] ?? '');
       const bar = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
       bar.setAttribute('x', '180');
@@ -444,16 +562,30 @@ function renderPanel(container, panel) {
       bar.setAttribute('width', String(Math.max(0, Math.min(400, (numericValue / max) * 400))));
       bar.setAttribute('height', '16');
       bar.setAttribute('rx', '6');
-      bar.setAttribute('class', 'bar-shape');
+      bar.setAttribute('class', 'bar-shape chart-mark');
+      configureChartMark(
+        bar,
+        `${columns[0]}: ${String(row[0] ?? '—')}; ${columns[1]}: ${String(row[1] ?? '—')}`,
+        tooltip,
+        index,
+        panel.crossFilter && row[0] !== null && row[0] !== undefined &&
+          String(row[0]).length <= 500
+          ? () => selectDashboardFilter(panel, row[0])
+          : undefined,
+      );
+      marks.push(bar);
       const value = document.createElementNS('http://www.w3.org/2000/svg', 'text');
       value.setAttribute('x', '590');
       value.setAttribute('y', String(y + 12));
       value.setAttribute('text-anchor', 'end');
       value.setAttribute('class', 'svg-chart-value');
+      value.setAttribute('aria-hidden', 'true');
       value.textContent = String(row[1] ?? '');
       chart.append(label, bar, value);
     });
-    card.append(chart);
+    enableChartPointNavigation(marks);
+    chartContainer.append(chart, createChartHint());
+    card.append(chartContainer);
     if (rows.length > displayedRows.length) {
       const note = document.createElement('p');
       note.className = 'muted';
@@ -476,10 +608,13 @@ function renderPanel(container, panel) {
         ((safeValue - min) / Math.max(1, max - min)) * (height - padding * 2);
       return { x, y };
     });
+    const chartContainer = document.createElement('div');
+    chartContainer.className = 'chart-container';
+    const tooltip = createChartTooltip(chartContainer);
     const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
     svg.setAttribute('viewBox', `0 0 ${width} ${height}`);
-    svg.setAttribute('role', 'img');
-    svg.setAttribute('aria-label', panel.title);
+    svg.setAttribute('role', 'group');
+    svg.setAttribute('aria-label', `${panel.title} chart. Focus a data point and use arrow keys to navigate.`);
     if (panel.chartType === 'AREA') {
       const area = document.createElementNS('http://www.w3.org/2000/svg', 'path');
       const first = points[0];
@@ -495,6 +630,28 @@ function renderPanel(container, panel) {
     line.setAttribute('points', points.map(({ x, y }) => `${x},${y}`).join(' '));
     line.setAttribute('class', 'line-shape');
     svg.append(line);
+    const marks = points.map((point) => {
+      const marker = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+      marker.setAttribute('cx', String(point.x));
+      marker.setAttribute('cy', String(point.y));
+      marker.setAttribute('r', '5');
+      marker.setAttribute('class', 'chart-mark chart-point');
+      return marker;
+    });
+    marks.forEach((marker, index) => {
+      configureChartMark(
+        marker,
+        `${columns[0]}: ${String(rows[index][0] ?? '—')}; ${columns[1]}: ${String(rows[index][1] ?? '—')}`,
+        tooltip,
+        index,
+        panel.crossFilter && rows[index][0] !== null && rows[index][0] !== undefined &&
+          String(rows[index][0]).length <= 500
+          ? () => selectDashboardFilter(panel, rows[index][0])
+          : undefined,
+      );
+    });
+    enableChartPointNavigation(marks);
+    svg.append(...marks);
     const labels = document.createElement('div');
     labels.className = 'chart-labels';
     rows.forEach((row) => {
@@ -502,13 +659,84 @@ function renderPanel(container, panel) {
       label.textContent = `${String(row[0] ?? '')}: ${String(row[1] ?? '')}`;
       labels.append(label);
     });
-    card.append(svg, labels);
+    chartContainer.append(svg, labels, createChartHint());
+    card.append(chartContainer);
   } else {
     const table = document.createElement('div');
     renderResultTable(table, panel.result);
     card.append(table);
   }
   container.append(card);
+}
+
+function createChartTooltip(container) {
+  const tooltip = document.createElement('div');
+  tooltip.className = 'chart-tooltip';
+  tooltip.id = `chart-tooltip-${++chartTooltipSequence}`;
+  tooltip.setAttribute('role', 'tooltip');
+  tooltip.hidden = true;
+  container.append(tooltip);
+  return tooltip;
+}
+
+function configureChartMark(mark, label, tooltip, index, onActivate) {
+  const canFilter = Boolean(onActivate);
+  mark.setAttribute('role', canFilter ? 'button' : 'img');
+  mark.setAttribute('aria-label', canFilter ? `${label}. Activate to filter the dashboard.` : label);
+  mark.setAttribute('aria-describedby', tooltip.id);
+  mark.setAttribute('tabindex', index === 0 ? '0' : '-1');
+
+  const showTooltip = () => {
+    tooltip.textContent = label;
+    tooltip.hidden = false;
+  };
+  const hideTooltip = () => {
+    if (document.activeElement !== mark && !mark.matches(':hover')) tooltip.hidden = true;
+  };
+  mark.addEventListener('pointerenter', showTooltip);
+  mark.addEventListener('pointerleave', hideTooltip);
+  mark.addEventListener('focus', showTooltip);
+  mark.addEventListener('blur', hideTooltip);
+  if (canFilter) {
+    mark.addEventListener('click', onActivate);
+    mark.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter' || event.key === ' ') {
+        event.preventDefault();
+        onActivate();
+      }
+    });
+  }
+}
+
+function enableChartPointNavigation(marks) {
+  marks.forEach((mark, index) => {
+    mark.addEventListener('keydown', (event) => {
+      let nextIndex;
+      if (event.key === 'ArrowRight' || event.key === 'ArrowDown') {
+        nextIndex = Math.min(index + 1, marks.length - 1);
+      } else if (event.key === 'ArrowLeft' || event.key === 'ArrowUp') {
+        nextIndex = Math.max(index - 1, 0);
+      } else if (event.key === 'Home') {
+        nextIndex = 0;
+      } else if (event.key === 'End') {
+        nextIndex = marks.length - 1;
+      } else {
+        return;
+      }
+
+      event.preventDefault();
+      mark.setAttribute('tabindex', '-1');
+      marks[nextIndex].setAttribute('tabindex', '0');
+      marks[nextIndex].focus();
+    });
+  });
+}
+
+function createChartHint() {
+  const hint = document.createElement('p');
+  hint.className = 'muted chart-hint';
+  hint.textContent = 'Hover or focus a data point to see its values. Use arrow keys to navigate.';
+  return hint;
 }
 
 async function openWorkspace() {
@@ -685,6 +913,12 @@ document.querySelector('#refresh-dashboards').addEventListener('click', async ()
     showMessage('Dashboards refreshed.');
   } catch (error) {
     showMessage(error.message, true);
+  }
+});
+
+document.querySelector('#clear-dashboard-filter').addEventListener('click', () => {
+  if (currentDashboardId && activeDashboardFilter) {
+    loadDashboardResults(currentDashboardId);
   }
 });
 

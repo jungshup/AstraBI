@@ -121,7 +121,7 @@
           <div class="section-heading">
             <div>
               <h2>Datasets</h2>
-              <p class="muted">CSV data is imported; PostgreSQL tables are read from their source.</p>
+              <p class="muted">CSV and PostgreSQL datasets are queried from snapshots stored in AstraBI.</p>
             </div>
             <button id="refresh-datasets" class="button button-quiet" type="button">Refresh</button>
           </div>
@@ -183,9 +183,12 @@
           <div class="section-heading">
             <div>
               <h2>Dashboards</h2>
-              <p class="muted">Save the current query as a dashboard panel.</p>
+              <p class="muted">Select a chart value to filter matching visual panels.</p>
             </div>
-            <button id="refresh-dashboards" class="button button-quiet" type="button">Refresh</button>
+            <div class="dashboard-actions">
+              <button id="clear-dashboard-filter" class="button button-quiet" type="button" hidden>Clear chart filter</button>
+              <button id="refresh-dashboards" class="button button-quiet" type="button">Refresh</button>
+            </div>
           </div>
           <form id="dashboard-form" class="inline-form">
             <label>New dashboard<input name="name" maxlength="120" required></label>
@@ -205,6 +208,7 @@
             </label>
             <button class="button" type="submit">Save panel</button>
           </form>
+          <p id="dashboard-filter-status" class="muted dashboard-filter-status" role="status" hidden></p>
           <div id="dashboards-list" class="dashboard-list"></div>
           <div id="dashboard-results" class="dashboard-grid"></div>
         </section>

@@ -1,7 +1,5 @@
-import { Client } from 'pg';
 import { DuckDBInstance, type DuckDBConnection } from '@duckdb/node-api';
 import { z } from 'zod';
-import { decryptSecret } from '@astrabi/security';
 import type { PrismaClient } from '@astrabi/prisma';
 
 const MAX_SOURCE_ROWS = 25_000;
@@ -72,25 +70,9 @@ export class AnalyticsError extends Error {
   }
 }
 
-interface PostgresConnectionConfig {
-  host: string;
-  port: number;
-  database: string;
-  user: string;
-  password: string;
-}
-
 interface LoadedDataset {
   id: string;
   columns: unknown;
-  sourceSchema: string | null;
-  sourceTable: string | null;
-  dataSource: {
-    kind: 'CSV' | 'POSTGRES';
-    encryptedConfig: string | null;
-    encryptionIv: string | null;
-    encryptionTag: string | null;
-  };
 }
 
 interface DatasetColumn {
@@ -102,8 +84,6 @@ interface DatasetColumn {
 export async function executeAnalyticsQuery(
   prisma: PrismaClient,
   tenantId: string,
-  encryptionKey: string,
-  postgresHostAllowlist: string[],
   query: AnalyticsQuery,
 ): Promise<{ columns: string[]; rows: unknown[][]; truncated: boolean }> {
   if (activeQueries >= 2) {
@@ -125,7 +105,6 @@ export async function executeAnalyticsQuery(
 
     const datasets = await prisma.dataSet.findMany({
       where: { tenantId, id: { in: datasetIds } },
-      include: { dataSource: true },
     });
     if (datasets.length !== datasetIds.length) {
       throw new AnalyticsError(404, 'dataset_not_found', 'A selected dataset was not found.');
@@ -140,13 +119,7 @@ export async function executeAnalyticsQuery(
 
     for (const dataset of datasets) {
       const columns = columnSchema.array().parse(dataset.columns);
-      const sourceRows = await loadDatasetRows(
-        prisma,
-        tenantId,
-        encryptionKey,
-        postgresHostAllowlist,
-        dataset,
-      );
+      const sourceRows = await loadDatasetRows(prisma, tenantId, dataset);
       if (sourceRows.length > MAX_SOURCE_ROWS) {
         throw new AnalyticsError(413, 'dataset_too_large', 'A selected dataset exceeds the query row limit.');
       }
@@ -236,80 +209,23 @@ export async function executeAnalyticsQuery(
 async function loadDatasetRows(
   prisma: PrismaClient,
   tenantId: string,
-  encryptionKey: string,
-  postgresHostAllowlist: string[],
   dataset: LoadedDataset,
 ): Promise<Array<Array<string | null>>> {
-  if (dataset.dataSource.kind === 'CSV') {
-    const records = await prisma.dataRow.findMany({
-      where: { tenantId, datasetId: dataset.id },
-      orderBy: { rowIndex: 'asc' },
-      take: MAX_SOURCE_ROWS + 1,
-      select: { data: true },
-    });
-    return records.map(({ data }) => {
-      if (!Array.isArray(data)) {
-        throw new AnalyticsError(500, 'invalid_dataset', 'Stored CSV data is invalid.');
-      }
-      return data.map((value) => value === null ? null : String(value));
-    });
-  }
-
-  if (!dataset.dataSource.encryptedConfig || !dataset.dataSource.encryptionIv ||
-      !dataset.dataSource.encryptionTag || !dataset.sourceSchema || !dataset.sourceTable) {
-    throw new AnalyticsError(500, 'invalid_data_source', 'The PostgreSQL source configuration is incomplete.');
-  }
-
-  let sourceConfig: PostgresConnectionConfig;
-  try {
-    sourceConfig = z.object({
-      host: z.string(),
-      port: z.number().int(),
-      database: z.string(),
-      user: z.string(),
-      password: z.string(),
-    }).parse(JSON.parse(decryptSecret({
-      ciphertext: dataset.dataSource.encryptedConfig,
-      iv: dataset.dataSource.encryptionIv,
-      authTag: dataset.dataSource.encryptionTag,
-    }, encryptionKey)));
-  } catch {
-    throw new AnalyticsError(500, 'invalid_data_source', 'The PostgreSQL source configuration could not be decrypted.');
-  }
-  if (!postgresHostAllowlist.includes(sourceConfig.host.toLowerCase())) {
-    throw new AnalyticsError(403, 'postgres_host_not_allowed', 'This PostgreSQL host is no longer allowed.');
-  }
-
-  const client = new Client({
-    ...sourceConfig,
-    ssl: { rejectUnauthorized: true },
-    connectionTimeoutMillis: 5_000,
-    statement_timeout: 5_000,
+  const records = await prisma.dataRow.findMany({
+    where: { tenantId, datasetId: dataset.id },
+    orderBy: { rowIndex: 'asc' },
+    take: MAX_SOURCE_ROWS + 1,
+    select: { data: true },
   });
-  let connected = false;
-  try {
-    await client.connect();
-    connected = true;
-    await client.query('BEGIN READ ONLY');
-    await client.query("SET LOCAL statement_timeout = '5s'");
-    const result = await client.query(
-      `SELECT * FROM ${quotePostgresIdentifier(dataset.sourceSchema)}.${quotePostgresIdentifier(dataset.sourceTable)} LIMIT $1`,
-      [MAX_SOURCE_ROWS + 1],
-    );
-    await client.query('COMMIT');
-    if (result.rows.length > MAX_SOURCE_ROWS) {
-      throw new AnalyticsError(413, 'dataset_too_large', 'A selected PostgreSQL table exceeds the query row limit.');
-    }
-    const columns = columnSchema.array().parse(dataset.columns);
-    return result.rows.map((row) =>
-      columns.map(({ name }) => toCell(row[name])),
-    );
-  } catch (error) {
-    if (error instanceof AnalyticsError) throw error;
-    throw new AnalyticsError(502, 'source_query_failed', 'The PostgreSQL source query failed.');
-  } finally {
-    if (connected) await client.end();
+  if (records.length > MAX_SOURCE_ROWS) {
+    throw new AnalyticsError(413, 'dataset_too_large', 'A dataset exceeds the query row limit.');
   }
+  return records.map(({ data }) => {
+    if (!Array.isArray(data)) {
+      throw new AnalyticsError(500, 'invalid_dataset', 'Stored dataset rows are invalid.');
+    }
+    return data.map(toCell);
+  });
 }
 
 async function registerDataset(
@@ -431,10 +347,6 @@ function duckTableName(datasetId: string): string {
 }
 
 function quoteDuckDbIdentifier(identifier: string): string {
-  return `"${identifier.replace(/"/g, '""')}"`;
-}
-
-function quotePostgresIdentifier(identifier: string): string {
   return `"${identifier.replace(/"/g, '""')}"`;
 }
 

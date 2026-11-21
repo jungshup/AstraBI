@@ -44,6 +44,39 @@ The API integration tests are skipped when `ASTRABI_TEST_DATABASE_URL` is
 unset. They exercise login and role enforcement, CSV import, visual and SQL
 queries, dashboard panels, tenant isolation, credential encryption, audit
 events, expired JWT rejection, and revocation of disabled-account sessions.
+Dashboard chart selections filter other visual panels that use the same
+dataset; the selected chart remains unfiltered, and SQL panels are not changed.
+Use **Clear chart filter** to restore the full dashboard.
+
+PostgreSQL datasets are copied into AstraBI snapshots on registration. Admins
+can refresh snapshots immediately or choose an automatic interval of 15
+minutes, 1 hour, 6 hours, or 24 hours; automatic refresh is off by default.
+Snapshot reads and replacement are bounded to 25,000 rows and committed
+atomically. If a refresh fails, the last successful snapshot remains available
+and the dataset reports the failure. Added or reordered source columns retain
+their dataset keys; removing a source column blocks refresh until the schema is
+reviewed. Datasets registered before snapshot support have no stored rows and
+must be refreshed manually after migrating.
+
+## Rotate the data-source encryption key
+
+The command re-encrypts all saved PostgreSQL source credentials in one
+transaction. Schedule a maintenance window, stop API instances to prevent new
+source credentials from being written during rotation, and take a verified
+database backup first. Keep both keys available until the command succeeds:
+
+```powershell
+$env:ASTRABI_DATA_ENCRYPTION_KEY = '<current 64-character hex key>'
+$env:ASTRABI_DATA_ENCRYPTION_NEW_KEY = '<new 64-character hex key>'
+npm run rotate-encryption-key --workspace @astrabi/api
+```
+
+After success, replace `ASTRABI_DATA_ENCRYPTION_KEY` in the runtime secret with
+the new key, remove `ASTRABI_DATA_ENCRYPTION_NEW_KEY`, and restart the API.
+Never use the same value for both keys. The command does not print either key;
+if a credential cannot be decrypted, the transaction rolls back without
+changing any source. Do not discard the old key or backup until you have
+verified all PostgreSQL sources can connect with the new runtime key.
 
 ## CI
 

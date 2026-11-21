@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { normalizePostgresHost } from './connectors.js';
 import { createServer } from './server.js';
+import { startDatasetRefreshScheduler } from './dataset-refresh.js';
 import { prisma } from '@astrabi/prisma';
 
 const configSchema = z.object({
@@ -15,11 +16,14 @@ const configSchema = z.object({
 
 const config = configSchema.parse(process.env);
 const app = await createServer({ prisma, config });
+let stopRefreshScheduler = async () => {};
 
 try {
   await app.listen({ host: '0.0.0.0', port: config.PORT });
+  stopRefreshScheduler = startDatasetRefreshScheduler(config, app.log, prisma);
   app.log.info(`AstraBI API listening on port ${config.PORT}`);
 } catch (error) {
+  stopRefreshScheduler();
   app.log.error(error);
   await prisma.$disconnect();
   process.exitCode = 1;
@@ -27,6 +31,7 @@ try {
 
 for (const signal of ['SIGINT', 'SIGTERM'] as const) {
   process.once(signal, async () => {
+    await stopRefreshScheduler();
     await app.close();
     await prisma.$disconnect();
   });

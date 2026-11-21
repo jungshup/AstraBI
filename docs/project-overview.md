@@ -51,12 +51,13 @@ AstraBI/
 - Tenant-scoped login, administrator user creation, role changes, and account disabling
 - Revocable JWT sessions, rate-limited login, and role-based API access
 - Browser UI for administrator sign-in and user management
-- Tenant-scoped PostgreSQL and CSV dataset connectors
+- Tenant-scoped PostgreSQL and CSV snapshot datasets with scheduled refresh
 - Visual query builder and single-statement, selected-dataset SQL editor
 - Persisted dashboards with table, number, bar, line, and area panels
+- Accessible chart tooltips, keyboard navigation, and dashboard cross-filtering
 - PostgreSQL-backed CI integration tests and Helm deployments for API and web
 
-Production encryption-key rotation, background refreshes for external data
-sources, and advanced chart interactions remain future work. See
+Background refreshes for external data sources and chart zoom remain future
+work. See
 [testing and deployment](testing.md) for configuration and operational
 guidance.
